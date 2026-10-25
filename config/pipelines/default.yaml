@@ -1,0 +1,27 @@
+name: default
+description: Requirements through integration with human gates on requirements, design and merge
+stages:
+  - id: requirements
+    agent: requirements
+    gate: human_approval
+  - id: design
+    agent: architect
+    gate: human_approval
+  - id: plan
+    agent: planner
+  - id: tests
+    agent: tester
+  - id: implement
+    agent: implementer
+    gate: { type: check, command: "pytest -q", must_pass: true }
+    on_fail: { retry: 3, then: review }
+  - id: review
+    parallel:
+      - agent: reviewer
+      - agent: security
+    on_fail: { goto: implement, max_loops: 2 }
+  - id: docs
+    agent: docs
+  - id: integrate
+    type: builtin.merge
+    gate: human_approval

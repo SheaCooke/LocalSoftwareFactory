@@ -1,0 +1,9 @@
+name: quick
+description: Text-only planning pass (requirements, design, plan) with no gates; runs on any model
+stages:
+  - id: requirements
+    agent: requirements
+  - id: design
+    agent: architect
+  - id: plan
+    agent: planner

@@ -1,0 +1,107 @@
+# Model registry.
+#
+# providers: named endpoints. `type` selects the adapter in factory/providers/.
+# models:    named aliases. Agents and the UI only ever refer to these aliases.
+#
+# Edits are validated on load; a bad edit keeps the last good config and shows
+# an error banner in the UI. Model IDs below are examples: change them to
+# whatever your account or local server actually serves.
+
+providers:
+  fake:
+    type: fake                      # offline, scripted / echo responses
+
+  openai:
+    type: openai_compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+
+  openrouter:
+    type: openai_compat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+  ollama:
+    type: openai_compat
+    base_url: http://localhost:11434/v1   # no key needed
+
+  lmstudio:
+    type: openai_compat
+    base_url: http://localhost:1234/v1
+
+  # Azure OpenAI: base_url points at the deployment; key goes in an `api-key` header.
+  # azure:
+  #   type: openai_compat
+  #   base_url: https://<resource>.openai.azure.com/openai/deployments/<deployment>
+  #   api_key_env: AZURE_OPENAI_API_KEY
+  #   auth_header: api-key
+  #   query_params: { api-version: "2024-10-21" }
+
+  anthropic:
+    type: anthropic                 # adapter lands in milestone 6
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+
+  gemini:
+    type: gemini                    # adapter lands in milestone 6
+    base_url: https://generativelanguage.googleapis.com
+    api_key_env: GEMINI_API_KEY
+
+models:
+  echo:
+    provider: fake
+    model: echo
+    description: Offline echo model for dry runs and tests
+    supports_tools: true
+    context_window: 1000000
+
+  fast:
+    provider: openai
+    model: gpt-5-mini
+    description: Cheap, quick model for simple stages
+    params: { temperature: 0.2 }
+    supports_tools: true
+    context_window: 400000
+    pricing: { input_per_mtok: 0.25, output_per_mtok: 2.0 }
+
+  smart:
+    provider: openai
+    model: gpt-5
+    description: Strong general model for design and implementation
+    params: { temperature: 0.2 }
+    supports_tools: true
+    supports_vision: true
+    context_window: 400000
+    pricing: { input_per_mtok: 1.25, output_per_mtok: 10.0 }
+
+  claude:
+    provider: anthropic
+    model: claude-sonnet-5-5
+    description: Anthropic Claude Sonnet
+    params: { max_tokens: 8192 }
+    supports_tools: true
+    supports_vision: true
+    context_window: 200000
+
+  gemini-pro:
+    provider: gemini
+    model: gemini-2.5-pro
+    description: Google Gemini Pro
+    supports_tools: true
+    supports_vision: true
+    context_window: 1000000
+
+  local-coder:
+    provider: ollama
+    model: qwen2.5-coder:14b
+    description: Local coding model via Ollama (no key, no cost)
+    params: { temperature: 0.1 }
+    supports_tools: true
+    context_window: 32768
+
+  local-plain:
+    provider: ollama
+    model: llama3.1:8b
+    description: Local model used without native tool calling (JSON tool protocol)
+    supports_tools: false
+    context_window: 8192
