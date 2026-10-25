@@ -69,9 +69,31 @@ def test_run_start_list_show_resume(factory_root: Path) -> None:
     assert resumed.exit_code == 0 and "passed" in resumed.stdout
 
 
-def test_run_start_rejects_unsupported_pipeline(factory_root: Path) -> None:
-    result = runner.invoke(app, ["run", "start", "x"])
-    assert result.exit_code == 1 and "milestone 4" in result.stderr
+def test_default_pipeline_gates_through_cli(factory_root: Path) -> None:
+    result = runner.invoke(app, ["run", "start", "todo app", "-m", "echo"])
+    assert result.exit_code == 0, result.output
+    assert "waiting_approval" in result.stdout and "approval #1 (gate)" in result.stdout
+    run_id = result.stdout.split()[1]
+    pending = runner.invoke(app, ["runs", "approvals"])
+    assert run_id in pending.stdout and "requirements" in pending.stdout
+    changed = runner.invoke(app, ["runs", "request-changes", run_id, "-c", "store todos as JSON"])
+    assert changed.exit_code == 0 and "approval #2 (gate)" in changed.stdout
+    approved = runner.invoke(app, ["runs", "approve", run_id, "--no-resume"])
+    assert approved.exit_code == 0 and "approved" in approved.stdout
+    shown = runner.invoke(app, ["runs", "show", run_id])
+    assert "changes_requested" in shown.stdout and "(store todos as JSON)" in shown.stdout
+    resumed = runner.invoke(app, ["runs", "resume", run_id])
+    assert "stage design: waiting_approval" in resumed.stdout
+    rejected = runner.invoke(app, ["runs", "reject", run_id, "-c", "stop"])
+    assert rejected.exit_code == 1
+    assert "rejected" in rejected.stdout and "failed" in rejected.stdout
+
+
+def test_approve_without_pending_fails(factory_root: Path) -> None:
+    result = runner.invoke(app, ["run", "start", "x", "-p", "quick", "-m", "echo", "-q"])
+    run_id = result.stdout.split()[1]
+    approve = runner.invoke(app, ["runs", "approve", run_id])
+    assert approve.exit_code == 1 and "no pending approval" in approve.stderr
 
 
 def test_agents_and_pipelines_list(factory_root: Path) -> None:

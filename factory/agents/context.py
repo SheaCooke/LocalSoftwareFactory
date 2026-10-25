@@ -43,6 +43,15 @@ class InvocationContext:
     feedback: str | None = None  # human gate comment or loop-back reason
     attempt: int = 1
     isolation: AgentIsolation | None = None
+    #: Called before every LLM call; returns a reason string when a budget is exhausted.
+    budget_check: Callable[[], str | None] | None = None
+    #: Re-reads the per-run override before every LLM call (so the UI can switch it mid-run).
+    model_override_source: Callable[[], str | None] | None = None
+
+    def current_model_override(self) -> str | None:
+        if self.model_override_source is not None:
+            return self.model_override_source()
+        return self.model_override
 
 
 def writes_outputs_with_tool(spec: AgentSpec, tool_names: Iterable[str]) -> bool:

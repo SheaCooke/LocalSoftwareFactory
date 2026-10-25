@@ -185,28 +185,72 @@ An agent is `agents/<name>/agent.md`: YAML frontmatter (validated by the Pydanti
 
 ## 6. Pipelines and orchestration (M2 sequential; M4 full)
 
-Pipelines are data. The `PipelineInterpreter` walks a validated `PipelineSpec`:
+Pipelines are data (`factory/core/pipeline.py`). The interpreter in
+`factory/core/orchestrator.py` walks a validated `PipelineSpec` with a persisted cursor.
 
-- **Stage kinds**: `agent`, `parallel` (list of agent branches run concurrently,
-  stage passes if all pass), `builtin.merge`, `builtin.lint`, `builtin.shell`. All
-  implement `StageExecutor.run(ctx) -> StageResult`.
-- **Gates**, evaluated after the stage body: `none`, `human_approval` (pauses run
-  in `waiting_approval`; resumes on Approve / Reject / Request-changes with comment),
-  `check` (sandboxed command, `must_pass`), `artifact_valid` (JSON Schema).
-- **Transitions**: default next stage; `on_fail.retry: N` re-runs the stage;
-  `on_fail.then: <id>` jumps forward; `on_fail.goto: <id>` with `max_loops` makes a
-  bounded loop. Loop counters persist per run.
-- **State**: `runs/factory.db` (SQLite, stdlib `sqlite3`) holds tables `runs`,
-  `stage_runs`, `approvals`, `usage`, `loop_counters`. Each transition is committed
-  before the next stage starts. On startup, any `running` stage is reset to
-  `pending` and re-executed. Completed stages are never re-run, so the run resumes
-  from the last completed stage.
-- **Budgets**: per-stage and per-run token/cost ceilings, checked after each LLM
-  call. A breach pauses the run in `waiting_approval` with reason `budget`.
-- **Event bus**: an in-process async pub/sub. Subscribers are the JSONL event log,
-  the SSE broadcaster, and the run store.
+**Per stage, in order:**
 
-Run directory: `runs/<run_id>/{artifacts/, transcripts/, events.jsonl}`.
+1. `when:` conditions. If false, the stage is `skipped`.
+2. A human gate with `before: true` (the default for `builtin.merge`) asks for
+   approval *before* the body runs.
+3. Budget check (see below).
+4. **Body.** `agent`, or `parallel` (branches run concurrently in a thread pool of
+   `limits.max_parallel_agents`, and every branch must pass). Or a builtin:
+   - `builtin.shell` and `builtin.lint` run a sandboxed command in a read-only
+     checkout of integration, with the report in `<stage>.json`. Lint defaults to
+     `ruff check .`.
+   - `builtin.merge` delivers integration to the target repo as branch
+     `factory/<run>`, never touching its checked-out branch. For a new project it
+     tags the result. Either way it writes `delivery.json`.
+5. **Automated gate.** `check` runs a sandboxed command, in the single writing
+   agent's own worktree (its unmerged work) or else in integration. The result
+   goes to `gate.report` (default `<stage>_check.json`). `must_pass: false` makes
+   it informational. `artifact_valid` validates JSON artifacts against JSON Schema
+   files (`factory/core/jsonschema_lite.py`).
+6. `pass_when:` conditions on JSON artifacts, e.g. `{artifact: review.json, path:
+   verdict, equals: pass}`. Operators: `equals`, `not_equals`, `in`, and `exists`.
+7. A human gate (after) asks for approval of the stage's outputs.
+
+**On failure** (`on_fail`):
+- `retry: N` re-runs the stage with the failure (e.g. the test output) as feedback.
+- `then: <later stage>` marks the stage failed and continues there, carrying its
+  work forward into integration.
+- `goto: <earlier stage>` resets that range to pending and loops back with
+  feedback, at most `max_loops` times.
+- With none of these, the run fails.
+
+`then` must point forward and `goto` backward (validated), so every run terminates.
+
+**Approvals** (`approvals` table; kinds `gate`, `budget`, `network`) pause the run
+in `waiting_approval`. `Orchestrator.decide()` records `approved`, `rejected` or
+`changes_requested` (with a comment), and the next `run()` applies it:
+- *Rejected*: the run fails.
+- *Changes requested*: the stage re-runs with the comment as feedback, alongside
+  its previous output.
+- *Budget approved*: that budget scope gets one more full allowance.
+- *Network* approvals are polled live by the waiting L3 agent (first use per run
+  only, timeout `limits.network_approval_timeout_s`).
+
+**State:** `runs/factory.db` (SQLite) holds `runs` (including a `state` JSON with
+the cursor, loop and retry counters, pending feedback, pre-approvals, budget
+allowances and the network decision), `stage_runs`, `approvals` and `usage`. Older
+databases are migrated in place. Every transition is committed before the next
+step. On restart, a `running` stage goes back to `pending` and re-runs; finished
+stages are never re-run; a run waiting for a human stays waiting.
+
+**Budgets:** per-run and per-stage token and cost limits, from `factory.yaml` or a
+pipeline/stage `budget:`. They are checked before every LLM call (through a
+runtime callback) and before each stage. A breach stops the agent before its next
+call and opens a `budget` approval. A writing agent's work so far is committed and
+kept for the re-run.
+
+**Event bus:** in-process synchronous pub/sub. Subscribers are the JSONL event
+log, the usage recorder, the CLI printer and (M5) the SSE broadcaster. Events
+added in M4: `gate.evaluated`, `stage.retry`, `stage.loop`, `stage.continue`,
+`stage.skipped`, `stage.parallel`, `approval.requested`, `approval.decided`,
+`budget.exceeded`, `workspace.committed`, `run.delivered`.
+
+Run directory: `runs/<run_id>/{artifacts/, transcripts/, events.jsonl, pipeline.yaml}`.
 
 ---
 
@@ -237,17 +281,53 @@ An agent sees only the tools it lists **and** whose level it meets. Built-ins:
 
 ## 9. UI (M5)
 
-FastAPI + Server-Sent Events + static `index.html` / `app.js` / `app.css`, with no
-build step. It binds to `127.0.0.1:8765`. Views:
+`factory up` serves a FastAPI app on `127.0.0.1` (port from `ui.port`, default
+8765). It resumes runs a previous process left `running`, and opens the browser:
+`wslview` or `explorer.exe` inside WSL, otherwise Python's `webbrowser`. The
+frontend is static `index.html` / `app.js` / `app.css` with no build step.
 
-- Horizontal stage graph with status colors. The current stage is enlarged and pulses.
-- Live activity stream (messages, tool calls, denials) filterable by agent.
-- Model selector: global dropdown + per-agent overrides. These write `factory.yaml`
-  and take effect on the next call.
-- Gate panel: Approve / Reject / Request changes + comment.
-- Artifact browser and diff viewer (`git diff` of each agent branch vs integration).
-- Token/cost tally per agent and per run; run history; start-run form.
-- Banners for config errors, agent load errors, reduced isolation.
+**Code layout** (`factory/ui/`):
+- `service.py` runs each run in its own background thread (`RunManager`) and builds
+  the JSON views. It holds no HTTP code, so tests drive it directly.
+- `app.py` contains the routes and the security middleware.
+- `broadcast.py` hands bus events from any thread to SSE clients through per-client
+  asyncio queues. A slow client drops events rather than blocking a run, and the
+  activity log reloads from `events.jsonl` on reconnect.
+
+**API** (all JSON; live updates on `GET /api/stream`, SSE):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/status` | config / agent / pipeline errors, sandbox mode, active runs, pending approvals |
+| `GET /api/models`, `POST /api/models/default`, `POST /api/models/agents/{agent}` | model selector (writes `config/overrides.yaml`) |
+| `GET /api/pipelines` | pipelines with stage shapes and "cannot run" reasons |
+| `GET/POST /api/runs` | history and start-run form |
+| `GET /api/runs/{id}` | stages (status, attempts, loops, retries, tokens), usage, approvals, artifact index, sandbox, delivery |
+| `GET /api/runs/{id}/events`, `/artifacts/{name}`, `/changes`, `/diff?ref=` | activity history, artifact text, branches / per-stage commits / diffs |
+| `POST /api/runs/{id}/decision`, `/resume`, `/model` | gate controls, resume, per-run model switch |
+
+**Views:**
+- Horizontal stage graph. The current stage is enlarged with a "current" or "needs
+  you" tag and pulses; each stage shows gate, verdict, retry and loop badges.
+- Live activity stream, filterable by agent and by kind (messages, tool calls,
+  denials, stages and gates, LLM calls, allowed access).
+- Approval cards (Approve / Request changes / Reject + comment) for gate, budget and
+  network requests.
+- Artifact browser grouped by stage; diff viewer for integration, each agent
+  branch, and each stage's commits.
+- Usage table per agent and per stage; run history; start-run form.
+- "Agents & models": global default, per-agent overrides, and which model each
+  agent's next call will use. Each run also has a run-model selector.
+- Banners for config errors (the last good config stays active), invalid agents,
+  invalid pipelines, and reduced isolation. Status is polled every 5 s, so file
+  edits show up without a watcher.
+
+**Security:**
+- The server binds loopback only (validated in config).
+- Requests need a loopback `Host` header, which blocks DNS rebinding.
+- State changes need a JSON body and, if present, a loopback `Origin` (CSRF).
+- All dynamic content is rendered with `textContent`, so LLM or artifact output
+  can't inject markup.
 
 ---
 

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Software Factory</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f6feb'/%3E%3Cpath d='M3 12V7l3 2V7l3 2V4h4v8z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <span>Software Factory</span>
+    </div>
+    <nav class="views" aria-label="Views">
+      <button type="button" class="view-btn active" data-view="runs">Runs</button>
+      <button type="button" class="view-btn" data-view="models">Agents &amp; models</button>
+    </nav>
+    <div class="topbar-right">
+      <span id="approvals-badge" class="badge warn" hidden></span>
+      <label class="inline">
+        <span>Default model</span>
+        <select id="default-model" aria-label="Global default model"></select>
+      </label>
+    </div>
+  </header>
+
+  <div id="banners" class="banners" aria-live="polite"></div>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <h2>New run</h2>
+        <form id="run-form" autocomplete="off">
+          <label class="field">
+            <span>Request</span>
+            <textarea name="request" rows="4" required placeholder="A CLI todo app with add, list and done commands"></textarea>
+          </label>
+          <label class="field">
+            <span>Pipeline</span>
+            <select name="pipeline" id="pipeline-select"></select>
+          </label>
+          <div id="pipeline-preview" class="pipeline-preview"></div>
+          <label class="field">
+            <span>Target repository</span>
+            <input name="repo" placeholder="Leave empty for a new project">
+          </label>
+          <label class="field">
+            <span>Model for every agent</span>
+            <select name="model" id="run-model-select"></select>
+          </label>
+          <button type="submit" class="primary" id="start-btn">Start run</button>
+        </form>
+      </section>
+      <section class="card grow">
+        <h2>Run history</h2>
+        <ul id="run-list" class="run-list"></ul>
+      </section>
+    </aside>
+
+    <main class="main">
+      <!-- Runs view -->
+      <section id="view-runs">
+        <div id="empty" class="empty">
+          <h1>No run selected</h1>
+          <p>Start a run on the left, or pick one from the history.</p>
+        </div>
+
+        <section id="run-view" hidden>
+          <div class="run-head">
+            <div class="run-title">
+              <h1 id="run-request"></h1>
+              <div class="meta" id="run-meta"></div>
+            </div>
+            <div class="run-actions">
+              <label class="inline">
+                <span>Run model</span>
+                <select id="run-override" aria-label="Per-run model override"></select>
+              </label>
+              <button type="button" id="resume-btn" hidden>Resume</button>
+            </div>
+          </div>
+
+          <div id="graph" class="graph" aria-label="Pipeline stages"></div>
+
+          <div id="approvals" class="approvals"></div>
+
+          <nav class="tabs" role="tablist">
+            <button type="button" role="tab" class="tab active" data-tab="activity">Activity</button>
+            <button type="button" role="tab" class="tab" data-tab="artifacts">Artifacts</button>
+            <button type="button" role="tab" class="tab" data-tab="changes">Changes</button>
+            <button type="button" role="tab" class="tab" data-tab="usage">Usage</button>
+          </nav>
+
+          <div class="tab-panel" id="tab-activity">
+            <div class="filters">
+              <label class="inline"><span>Agent</span><select id="agent-filter"></select></label>
+              <label class="check"><input type="checkbox" data-kind="message" checked> Messages</label>
+              <label class="check"><input type="checkbox" data-kind="tool" checked> Tool calls</label>
+              <label class="check"><input type="checkbox" data-kind="denied" checked> Denials</label>
+              <label class="check"><input type="checkbox" data-kind="flow" checked> Stages &amp; gates</label>
+              <label class="check"><input type="checkbox" data-kind="llm"> LLM calls</label>
+              <label class="check"><input type="checkbox" data-kind="allowed"> Allowed access</label>
+              <span class="spacer"></span>
+              <span id="live-dot" class="live" title="Live updates">live</span>
+            </div>
+            <ol id="activity" class="activity"></ol>
+          </div>
+
+          <div class="tab-panel split" id="tab-artifacts" hidden>
+            <ul id="artifact-list" class="side-list"></ul>
+            <div class="viewer">
+              <div class="viewer-head" id="artifact-title">Select an artifact</div>
+              <pre id="artifact-body" class="code"></pre>
+            </div>
+          </div>
+
+          <div class="tab-panel split" id="tab-changes" hidden>
+            <div id="change-refs" class="side-list"></div>
+            <div class="viewer">
+              <div class="viewer-head" id="diff-title">Select a branch or stage</div>
+              <pre id="diff-body" class="code diff"></pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="tab-usage" hidden>
+            <table class="table" id="usage-table"></table>
+          </div>
+        </section>
+      </section>
+
+      <!-- Models view -->
+      <section id="view-models" hidden>
+        <div class="card">
+          <h1>Agents &amp; models</h1>
+          <p class="muted">
+            Changes apply to the next LLM call, including in runs that are in progress.
+            Priority: run model, then agent override, then the agent.md default, then the global default.
+          </p>
+          <table class="table" id="agents-table"></table>
+        </div>
+        <div class="card">
+          <h2>Model aliases</h2>
+          <p class="muted">Defined in <code>config/models.yaml</code>.</p>
+          <table class="table" id="aliases-table"></table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

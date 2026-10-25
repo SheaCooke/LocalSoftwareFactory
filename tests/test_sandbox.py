@@ -205,10 +205,16 @@ def test_docker_timeout_kills_container(docker_sbx: DockerSandbox, tmp_path: Pat
 
     result = docker_sbx.run("sleep 120", workdir=tmp_path, timeout_s=3)
     assert result.timed_out and result.duration_s < 30
-    leftover = subprocess.run(
-        ["docker", "ps", "-aq", "--filter", "name=factory-"], capture_output=True, text=True
-    )
-    assert leftover.stdout.strip() == ""
+    # `--rm` removes the killed container asynchronously; give the daemon a moment.
+    deadline = time.monotonic() + 10
+    leftover = "?"
+    while leftover and time.monotonic() < deadline:
+        leftover = subprocess.run(
+            ["docker", "ps", "-aq", "--filter", "name=factory-"], capture_output=True, text=True
+        ).stdout.strip()
+        if leftover:
+            time.sleep(0.25)
+    assert leftover == ""
 
 
 @needs_docker

@@ -174,6 +174,72 @@ class RunRepo:
     def status(self, path: Path) -> str:
         return run_git(["status", "--short", "--branch"], path)
 
+    def deliver(self, target: Path | None) -> dict[str, str]:
+        """Hand the integration branch over (builtin.merge).
+
+        With a target repo, push integration to it as branch `factory/<run>`. The
+        target's checked-out branch and working tree are never touched. For a new
+        project, tag the delivered commit in the run repo instead.
+        """
+        with self._lock:
+            commit = run_git(["rev-parse", self.integration], self.repo).strip()
+            branch = f"factory/{self.run_id}"
+            if target is not None:
+                run_git(
+                    ["push", "--quiet", "origin", f"+{self.integration}:refs/heads/{branch}"],
+                    self.repo,
+                )
+                return {
+                    "target": str(target),
+                    "branch": branch,
+                    "commit": commit,
+                    "next_step": f"git -C {target} merge {branch}",
+                }
+            run_git(["tag", "-f", f"factory/{self.run_id}/delivered", commit], self.repo)
+            return {
+                "target": str(self.repo),
+                "branch": self.integration,
+                "commit": commit,
+                "next_step": f"git clone --branch {self.integration} {self.repo} <destination>",
+            }
+
+    # ------------------------------------------------------------------- inspection
+
+    def branches(self) -> list[str]:
+        """Agent names that have a branch in this run (excluding internal ones)."""
+        prefix = f"factory/{self.run_id}/"
+        out = run_git(
+            ["for-each-ref", "--format=%(refname:short)", f"refs/heads/{prefix}"], self.repo
+        )
+        names = [line[len(prefix) :] for line in out.splitlines() if line.startswith(prefix)]
+        return [n for n in names if n != "integration" and not n.startswith("_")]
+
+    def diff_from_base(self, ref: str, *, max_chars: int = 500_000) -> str:
+        """Everything on `ref` since the run started (stat + patch)."""
+        text = run_git(
+            ["diff", "--stat", "--patch", "--no-color", f"{self.base_ref}..{ref}"], self.repo
+        )
+        return text if len(text) <= max_chars else text[:max_chars] + "\n... [diff truncated]\n"
+
+    def stage_commits(self, stage_id: str) -> list[dict[str, str]]:
+        """Commits the factory made for one stage, across all agent branches."""
+        # Every factory branch, minus what was already there when the run started.
+        out = run_git(
+            ["log", "--branches=factory/*", f"^{self.base_ref}", "--format=%H%x1f%s%x1f%ci"],
+            self.repo,
+        )
+        marker = f"factory: {stage_id} by "
+        commits = []
+        for line in out.splitlines():
+            sha, subject, when = ([*line.split("\x1f"), "", ""])[:3]
+            if subject.startswith(marker):
+                commits.append({"sha": sha, "subject": subject, "date": when})
+        return commits
+
+    def show(self, sha: str, *, max_chars: int = 500_000) -> str:
+        text = run_git(["show", "--stat", "--patch", "--no-color", "--format=%s%n", sha], self.repo)
+        return text if len(text) <= max_chars else text[:max_chars] + "\n... [diff truncated]\n"
+
     def files_on_integration(self) -> list[str]:
         return run_git(["ls-tree", "-r", "--name-only", self.integration], self.repo).splitlines()
 

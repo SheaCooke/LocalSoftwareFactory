@@ -6,6 +6,7 @@ that was in flight. The orchestrator re-runs that stage on resume.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -57,7 +58,29 @@ CREATE TABLE IF NOT EXISTS usage (
     at             REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_run ON usage(run_id);
+CREATE TABLE IF NOT EXISTS approvals (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       TEXT NOT NULL REFERENCES runs(id),
+    stage_id     TEXT,
+    kind         TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    summary      TEXT NOT NULL,
+    details      TEXT NOT NULL DEFAULT '{}',
+    comment      TEXT,
+    created_at   REAL NOT NULL,
+    decided_at   REAL
+);
+CREATE INDEX IF NOT EXISTS approvals_run ON approvals(run_id, status);
 """
+
+# Columns added after the first release; applied with ALTER TABLE on older databases.
+_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("runs", "state", "TEXT NOT NULL DEFAULT '{}'"),
+]
+
+ApprovalKind = Literal["gate", "budget", "network"]
+ApprovalStatus = Literal["pending", "approved", "rejected", "changes_requested"]
+DECISIONS: frozenset[str] = frozenset({"approved", "rejected", "changes_requested"})
 
 
 @dataclass(frozen=True)
@@ -72,6 +95,31 @@ class RunRecord:
     model_override: str | None
     current_stage: str | None
     error: str | None
+    state: str = "{}"  # JSON: interpreter cursor, loop/retry counters, feedback, allowances
+
+    @property
+    def state_dict(self) -> dict[str, Any]:
+        loaded = json.loads(self.state or "{}")
+        return loaded if isinstance(loaded, dict) else {}
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    id: int
+    run_id: str
+    stage_id: str | None
+    kind: str
+    status: str
+    summary: str
+    details: str
+    comment: str | None
+    created_at: float
+    decided_at: float | None
+
+    @property
+    def details_dict(self) -> dict[str, Any]:
+        loaded = json.loads(self.details or "{}")
+        return loaded if isinstance(loaded, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -106,6 +154,10 @@ class RunStore:
         self._lock = threading.Lock()
         with self._conn() as db:
             db.executescript(_SCHEMA)
+            for table, column, decl in _MIGRATIONS:
+                existing = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -161,7 +213,7 @@ class RunStore:
         return [RunRecord(**dict(r)) for r in rows]
 
     def update_run(self, run_id: str, **fields: Any) -> None:
-        allowed = {"status", "current_stage", "error", "model_override"}
+        allowed = {"status", "current_stage", "error", "model_override", "state"}
         if not fields or not set(fields) <= allowed:
             raise ValueError(f"cannot update run fields {sorted(set(fields) - allowed)}")
         cols = ", ".join(f"{k} = ?" for k in fields)
@@ -272,3 +324,65 @@ class RunStore:
         with self._conn() as db:
             r = db.execute(sql, args).fetchone()
         return UsageTotals(None, r["i"], r["o"], r["c"], r["n"])
+
+    # ------------------------------------------------------------------------ run state
+
+    def run_state(self, run_id: str) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        return run.state_dict if run else {}
+
+    def save_state(self, run_id: str, state: dict[str, Any]) -> None:
+        self.update_run(run_id, state=json.dumps(state, sort_keys=True))
+
+    # ------------------------------------------------------------------------ approvals
+
+    def create_approval(
+        self,
+        run_id: str,
+        *,
+        stage_id: str | None,
+        kind: ApprovalKind,
+        summary: str,
+        details: dict[str, Any] | None = None,
+    ) -> ApprovalRecord:
+        with self._conn() as db:
+            cur = db.execute(
+                "INSERT INTO approvals (run_id, stage_id, kind, status, summary, details,"
+                " created_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                (run_id, stage_id, kind, summary, json.dumps(details or {}), time.time()),
+            )
+            approval_id = int(cur.lastrowid or 0)
+        approval = self.approval(approval_id)
+        assert approval is not None
+        return approval
+
+    def approval(self, approval_id: int) -> ApprovalRecord | None:
+        with self._conn() as db:
+            row = db.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+        return ApprovalRecord(**dict(row)) if row else None
+
+    def approvals(
+        self, run_id: str | None = None, *, status: ApprovalStatus | None = None
+    ) -> list[ApprovalRecord]:
+        sql, args = "SELECT * FROM approvals WHERE 1=1", []
+        if run_id is not None:
+            sql += " AND run_id = ?"
+            args.append(run_id)
+        if status is not None:
+            sql += " AND status = ?"
+            args.append(status)
+        with self._conn() as db:
+            rows = db.execute(sql + " ORDER BY id", args).fetchall()
+        return [ApprovalRecord(**dict(r)) for r in rows]
+
+    def decide_approval(self, approval_id: int, status: str, comment: str | None = None) -> bool:
+        """Record a decision. Returns False if the approval was not pending (no change)."""
+        if status not in DECISIONS:
+            raise ValueError(f"invalid decision {status!r}")
+        with self._conn() as db:
+            cur = db.execute(
+                "UPDATE approvals SET status = ?, comment = ?, decided_at = ?"
+                " WHERE id = ? AND status = 'pending'",
+                (status, comment, time.time(), approval_id),
+            )
+            return cur.rowcount == 1

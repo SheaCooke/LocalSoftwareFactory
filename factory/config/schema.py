@@ -97,6 +97,8 @@ class PathsConfig(_Strict):
 
 class LimitsConfig(_Strict):
     max_parallel_agents: int = Field(default=4, ge=1)
+    #: How long an agent blocks waiting for a human to approve L3 network access.
+    network_approval_timeout_s: int = Field(default=600, ge=1)
 
 
 class SandboxConfig(_Strict):

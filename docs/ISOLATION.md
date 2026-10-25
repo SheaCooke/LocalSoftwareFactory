@@ -106,9 +106,12 @@ a tool above its level fails to start, with a clear error.
 | L2 | + `fs.write`, `shell.run_sandboxed` | writable worktree |
 | L3 | + `network: true` on `shell.run_sandboxed` | writable worktree |
 
-L3 networked commands need human approval on first use per run. The approval gate
-arrives in milestone 4. Until then, networked commands are always denied. They also
-require the Docker backend.
+L3 networked commands need human approval on first use per run. The agent blocks
+and a `network` approval appears (`factory runs approvals`). Approve it from
+another terminal with `factory runs approve <run> --id <n>`. The decision is
+remembered for the rest of the run. An unanswered request is rejected after
+`limits.network_approval_timeout_s`. Even when approved, networked commands
+require the Docker backend; the subprocess fallback refuses them.
 
 ### Sandbox backends (`factory/isolation/sandboxes/`)
 

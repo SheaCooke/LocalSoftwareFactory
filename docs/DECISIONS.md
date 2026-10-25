@@ -196,3 +196,102 @@ The UI binds to `127.0.0.1:8765` inside WSL. WSL2's localhost forwarding makes i
 reachable from the Windows browser at the same address. To open the browser from
 WSL, `factory up` will try `wslview`, then `explorer.exe`, then Python's
 `webbrowser`, and always print the URL.
+
+### D35. Review verdicts drive transitions through `pass_when`, not a new gate type
+The spec's gate types are fixed (`human_approval`, `check`, `artifact_valid`,
+`none`), yet the review stage must be able to fail when a reviewer says "fail".
+Stages therefore take data-only conditions: `pass_when` (fail the stage if false)
+and `when` (skip it if false). Each condition is an `{artifact, path, equals |
+not_equals | in}` or `{exists}` check. There is no expression language, so nothing
+is `eval`ed. The shipped `default.yaml` adds an `artifact_valid` gate with report
+schemas and `pass_when` on both verdicts. Without them, review could never fail
+and the `goto implement` loop would be dead code.
+
+### D36. Gate order: automated gate → `pass_when` → human gate
+Validity is checked before verdicts, so a malformed `review.json` reports "invalid
+JSON" rather than "verdict mismatch". The human gate comes last, so people only
+review work that passed the automated checks. For `builtin.merge` the human gate
+runs *before* the body (overridable with `gate.before`), because a gate after
+delivery would be pointless.
+
+### D37. `then` jumps forward only, `goto` backward only
+Both are validated at load time. With `max_loops` and `retry` bounds, every run is
+guaranteed to terminate. A `then` jump carries the failed stage's work into
+integration (reviewers need to see the failing code). Stages it jumps over stay
+`pending`.
+
+### D38. Failed `check` gates never merge
+A writing agent's worktree is committed after every invocation, but merged into
+integration only when its stage passes, or is carried forward by `then`. Retries
+continue in the same worktree, so the agent builds on its previous attempt. The
+check runs in that worktree, so it tests exactly the unmerged change.
+
+### D39. Approval semantics
+- *Reject* fails the run (`runs resume` re-asks).
+- *Request changes* re-runs the stage with the comment as feedback, alongside the
+  agent's previous output. On a builtin stage it counts as a failure for `on_fail`.
+- *Budget approval* adds one more full allowance to the exceeded scope (run, or
+  `stage:<id>`).
+- Stage budgets accumulate across retries and loops within a run.
+
+### D40. Budgets stop an agent between LLM calls
+The runtime calls a budget callback before every LLM call. On a breach the agent
+stops and its conversation is dropped, but its committed work is kept. After
+approval the stage restarts with a fresh conversation over that work. Persisting
+and resuming a half-finished conversation across process restarts would be far
+more complex, and sessions are not meant to be shared (context isolation).
+
+### D41. L3 network approval blocks the agent and polls the database
+An agent's tool call is synchronous, so the L3 approver creates a `network`
+approval and polls SQLite until a decision arrives (from another CLI process or,
+in M5, the UI) or `network_approval_timeout_s` passes. The decision holds for the
+rest of the run. Pending network approvals left by a crashed process are rejected
+as superseded at the next `run()`, and the agent simply asks again.
+
+### D42. A small JSON Schema subset instead of the `jsonschema` package
+`artifact_valid` uses `factory/core/jsonschema_lite.py`: type, enum, const,
+required, properties, additionalProperties, items, min/max items/length,
+pattern, minimum/maximum, anyOf/oneOf/allOf. That covers agent report schemas and
+avoids a dependency with compiled extensions. Swap in `jsonschema` if a schema
+ever needs `$ref`.
+
+### D43. D28 is superseded
+Networked commands are no longer always denied. They follow D41.
+
+### D44. The UI process owns run execution; one thread per run
+`factory up` runs each run in a background thread of the server process
+(`RunManager`). Runs are independent of browser connections. Closing the tab
+changes nothing, and stopping the server leaves runs `running`, which the next
+`factory up` resumes (`--no-resume` to skip). The CLI still works against the same
+SQLite store. Avoid running the same run from both at once.
+
+### D45. SSE without extra dependencies
+Server-Sent Events are written directly as a `StreamingResponse`, with no
+`sse-starlette`. Events go from the synchronous bus to each client's asyncio queue
+via `call_soon_threadsafe`. Queues are bounded, so a stalled browser loses events
+instead of slowing a run. The activity view rebuilds from `events.jsonl` when a
+run is opened. One global stream is used, filtered client-side, so the run list
+and banners update too.
+
+### D46. Loopback-only, rebinding- and CSRF-resistant API without auth
+The UI has no login (it is a local tool), so other defences apply. The server
+binds 127.0.0.1. Requests whose `Host` is not loopback get 403 (DNS rebinding).
+Mutating requests must be `application/json`, which a cross-site form cannot send
+without a CORS preflight that we never grant. A non-loopback `Origin` is refused.
+Diff refs and artifact names are validated before reaching git or the filesystem.
+
+### D47. The per-run model override is re-read on every LLM call
+A run's own model (the start form or `--model`) beats per-agent overrides by
+design. It used to be captured when an invocation started, which would have
+defeated "switch to local Ollama mid-run" for such runs.
+`InvocationContext.model_override_source` now reads it from the store before each
+call, and the run header has a selector for it.
+
+### D48. No Markdown rendering for artifacts
+Artifacts are shown as preformatted text (JSON pretty-printed). Rendering Markdown
+safely would need a sanitizer or a vendored library. Raw text is exactly what the
+next agent sees, which is what a reviewer should check.
+
+### D49. D34 implemented
+In WSL, `factory up` opens the Windows browser via `wslview`, then `explorer.exe`,
+then Python's `webbrowser`, and always prints the URL.

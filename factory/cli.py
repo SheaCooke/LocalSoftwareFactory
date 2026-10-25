@@ -186,10 +186,53 @@ def _print_event(event: Event) -> None:
         typer.echo(f"   {who} wrote artifact {d['name']}")
     elif event.type == "isolation.status" and d.get("reduced"):
         typer.secho(f"!! {d['message']}", fg=typer.colors.YELLOW, bold=True)
-    elif event.type == "workspace.landed":
-        merged = " -> merged into integration" if d.get("merged_to_integration") else ""
-        commit = str(d["commit"])[:10] if d.get("commit") else "no changes"
-        typer.echo(f"   {who} committed {commit} on {d['branch']}{merged}")
+    elif event.type == "workspace.landed" and d.get("merged_to_integration"):
+        typer.echo(f"   {who} merged {str(d['commit'])[:10]} from {d['branch']} into integration")
+    elif event.type == "gate.evaluated":
+        mark = "ok" if d.get("passed") else "FAILED"
+        color = typer.colors.GREEN if d.get("passed") else typer.colors.RED
+        detail = "; ".join(str(x) for x in d.get("detail") or [])
+        typer.secho(f"   gate {d['gate']} {mark}" + (f": {detail}" if detail else ""), fg=color)
+    elif event.type == "stage.retry":
+        typer.secho(f"   retry {d['retry']}/{d['of']} of {event.stage}", fg=typer.colors.YELLOW)
+    elif event.type == "stage.loop":
+        typer.secho(
+            f"   {event.stage} failed: looping back to {d['goto']} ({d['loop']}/{d['max_loops']})",
+            fg=typer.colors.YELLOW,
+        )
+    elif event.type == "stage.continue":
+        typer.secho(f"   {event.stage} failed; continuing at {d['then']}", fg=typer.colors.YELLOW)
+    elif event.type == "stage.skipped":
+        typer.echo(f"   skipped ({'; '.join(d.get('why') or [])})")
+    elif event.type == "budget.exceeded":
+        typer.secho(f"!! budget exceeded: {d['message']}", fg=typer.colors.YELLOW, bold=True)
+    elif event.type == "approval.requested" and d.get("kind") == "network":
+        typer.secho(
+            f"?? approval #{d['id']} needed: {d['summary']}\n"
+            f"   approve from another terminal: factory runs approve {event.run_id} --id {d['id']}",
+            fg=typer.colors.YELLOW,
+            bold=True,
+        )
+    elif event.type == "run.delivered":
+        typer.secho(
+            f"   delivered {str(d['commit'])[:10]} as {d['branch']} in {d['target']}\n"
+            f"   next: {d['next_step']}",
+            fg=typer.colors.GREEN,
+        )
+
+
+def _report_waiting(orch: Orchestrator, run_id: str) -> None:
+    for approval in orch.pending_approvals(run_id):
+        typer.secho(f"?? approval #{approval.id} ({approval.kind}): {approval.summary}", bold=True)
+        artifacts = approval.details_dict.get("artifacts") or []
+        if artifacts:
+            folder = orch.run_dir(run_id) / "artifacts"
+            typer.echo(f"   review: {', '.join(artifacts)} in {folder}")
+        typer.echo(
+            f"   factory runs approve {run_id} [-c COMMENT] | "
+            f"factory runs request-changes {run_id} -c COMMENT | "
+            f"factory runs reject {run_id} [-c COMMENT]"
+        )
 
 
 def _execute(orch: Orchestrator, run_id: str, quiet: bool, *, resume: bool = False) -> None:
@@ -200,10 +243,37 @@ def _execute(orch: Orchestrator, run_id: str, quiet: bool, *, resume: bool = Fal
         if unsubscribe:
             unsubscribe()
         orch.resolver.close()
-    color = typer.colors.GREEN if run.status == "passed" else typer.colors.RED
+    color = {"passed": typer.colors.GREEN, "waiting_approval": typer.colors.YELLOW}.get(
+        run.status, typer.colors.RED
+    )
     typer.secho(f"run {run.id}: {run.status}" + (f" ({run.error})" if run.error else ""), fg=color)
+    if run.status == "waiting_approval":
+        _report_waiting(orch, run.id)
     if run.status == "failed":
         raise typer.Exit(1)
+
+
+def _decide(
+    run_id: str,
+    decision: str,
+    comment: str | None,
+    approval_id: int | None,
+    resume: bool,
+    quiet: bool,
+    root: Path | None,
+) -> None:
+    orch = _orchestrator(root)
+    if orch.store.get_run(run_id) is None:
+        raise _fail(f"run {run_id!r} not found")
+    try:
+        approval = orch.decide(run_id, decision, comment, approval_id=approval_id)
+    except PipelineError as exc:
+        raise _fail(str(exc)) from exc
+    typer.echo(f"approval #{approval.id} ({approval.kind}): {decision}")
+    if approval.kind == "network":
+        return  # the waiting agent picks this up itself
+    if resume:
+        _execute(orch, run_id, quiet)
 
 
 @run_app.command("start")
@@ -211,7 +281,7 @@ def run_start(
     request: Annotated[str, typer.Argument(help="Feature request text. Use '-' to read stdin.")],
     pipeline: Annotated[str, typer.Option("--pipeline", "-p", help="Pipeline name.")] = "default",
     repo: Annotated[
-        str | None, typer.Option("--repo", help="Target repository path (worktrees: milestone 3).")
+        str | None, typer.Option("--repo", help="Target git repository (omit for a new project).")
     ] = None,
     model: Annotated[
         str | None, typer.Option("--model", "-m", help="Per-run model override for every agent.")
@@ -286,6 +356,15 @@ def runs_show(
     typer.echo(
         f"   {'total':<14} calls={total.calls:<3} tokens={total.total_tokens} ${total.cost_usd:.4f}"
     )
+    approvals = orch.store.approvals(run_id)
+    if approvals:
+        typer.echo("\napprovals:")
+        for a in approvals:
+            note = f"  ({a.comment})" if a.comment else ""
+            typer.echo(f"   #{a.id:<4} {a.kind:<8} {a.stage_id or '-':<12} {a.status:<18}{note}")
+    state = run.state_dict
+    if state.get("loops") or state.get("retries"):
+        typer.echo(f"\nloops: {state.get('loops') or {}}  retries: {state.get('retries') or {}}")
     typer.echo("\nartifacts:")
     for name in orch.artifacts(run_id).list():
         typer.echo(f"   {name}")
@@ -317,6 +396,72 @@ def runs_resume(
     _execute(orch, run_id, quiet, resume=True)
 
 
+CommentOpt = Annotated[
+    str | None, typer.Option("--comment", "-c", help="Passed to the agent on re-run.")
+]
+ApprovalIdOpt = Annotated[
+    int | None, typer.Option("--id", help="Approval id, if the run has several pending.")
+]
+ResumeOpt = Annotated[
+    bool, typer.Option("--resume/--no-resume", help="Continue the run after deciding.")
+]
+QuietOpt = Annotated[bool, typer.Option("--quiet", "-q")]
+
+
+@runs_app.command("approve")
+def runs_approve(
+    run_id: Annotated[str, typer.Argument()],
+    comment: CommentOpt = None,
+    approval_id: ApprovalIdOpt = None,
+    resume: ResumeOpt = True,
+    quiet: QuietOpt = False,
+    root: RootOption = None,
+) -> None:
+    """Approve the run's pending gate, budget or network request (then continue)."""
+    _decide(run_id, "approved", comment, approval_id, resume, quiet, root)
+
+
+@runs_app.command("reject")
+def runs_reject(
+    run_id: Annotated[str, typer.Argument()],
+    comment: CommentOpt = None,
+    approval_id: ApprovalIdOpt = None,
+    root: RootOption = None,
+) -> None:
+    """Reject the pending request: the run fails (it can be resumed later)."""
+    _decide(run_id, "rejected", comment, approval_id, True, True, root)
+
+
+@runs_app.command("request-changes")
+def runs_request_changes(
+    run_id: Annotated[str, typer.Argument()],
+    comment: Annotated[str, typer.Option("--comment", "-c", help="What to change.")],
+    approval_id: ApprovalIdOpt = None,
+    resume: ResumeOpt = True,
+    quiet: QuietOpt = False,
+    root: RootOption = None,
+) -> None:
+    """Send the stage back to its agent with your comment as feedback."""
+    _decide(run_id, "changes_requested", comment, approval_id, resume, quiet, root)
+
+
+@runs_app.command("approvals")
+def runs_approvals(
+    run_id: Annotated[str | None, typer.Argument(help="Limit to one run.")] = None,
+    root: RootOption = None,
+) -> None:
+    """List pending approvals."""
+    orch = _orchestrator(root)
+    pending = orch.pending_approvals(run_id)
+    if not pending:
+        typer.echo("no pending approvals")
+    for a in pending:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(a.created_at))
+        typer.echo(
+            f"#{a.id:<4} {a.run_id}  {when}  {a.kind:<8} {a.stage_id or '-':<12} {a.summary}"
+        )
+
+
 @agents_app.command("list")
 def agents_list(root: RootOption = None) -> None:
     """List agent definitions and any load errors."""
@@ -338,11 +483,55 @@ def pipelines_list(root: RootOption = None) -> None:
         try:
             orch.check_runnable(spec)
             note = ""
-        except PipelineError:
-            note = "  (needs a later milestone or has errors; see `factory run start`)"
+        except PipelineError as exc:
+            note = f"\n      ! {exc}"
         typer.echo(f"  {name:<10} {stages}{note}")
     for file, message in sorted(errors.items()):
         typer.secho(f"! {file}: {message}", fg=typer.colors.RED)
+
+
+@app.command()
+def up(
+    port: Annotated[
+        int | None, typer.Option("--port", help="Default: ui.port in factory.yaml.")
+    ] = None,
+    open_: Annotated[
+        bool | None,
+        typer.Option("--open/--no-open", help="Open the browser (default: ui.open_browser)."),
+    ] = None,
+    resume: Annotated[
+        bool, typer.Option("--resume/--no-resume", help="Continue runs left running by a crash.")
+    ] = True,
+    root: RootOption = None,
+) -> None:
+    """Start the orchestrator and the web UI on 127.0.0.1, then open the browser."""
+    import threading
+
+    import uvicorn
+
+    from factory.ui.app import create_app
+    from factory.ui.launch import open_browser, port_free
+
+    live = _live(root)
+    ui = live.settings.factory.ui
+    port = port or ui.port
+    if not port_free(ui.host, port):
+        raise _fail(f"{ui.host}:{port} is already in use (is `factory up` already running?)")
+    application = create_app(live, resume_interrupted=resume)
+    url = f"http://localhost:{port}"
+    typer.secho(f"Software Factory UI: {url}  (bound to {ui.host} only; Ctrl+C to stop)", bold=True)
+    sandbox = application.state.service.status()["sandbox"]
+    if sandbox["reduced"]:
+        typer.secho(f"!! {sandbox['message']}", fg=typer.colors.YELLOW)
+    if open_ if open_ is not None else ui.open_browser:
+
+        def launch() -> None:
+            how = open_browser(url)
+            if how is None:
+                typer.echo(f"Open {url} in your browser.")
+
+        threading.Timer(1.0, launch).start()
+    uvicorn.run(application, host=ui.host, port=port, log_level="warning")
 
 
 @sandbox_app.command("status")

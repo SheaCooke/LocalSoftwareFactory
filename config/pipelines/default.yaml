@@ -3,7 +3,7 @@ description: Requirements through integration with human gates on requirements, 
 stages:
   - id: requirements
     agent: requirements
-    gate: human_approval
+    gate: human_approval          # answer the "Open questions" with Request changes
   - id: design
     agent: architect
     gate: human_approval
@@ -13,15 +13,23 @@ stages:
     agent: tester
   - id: implement
     agent: implementer
-    gate: { type: check, command: "pytest -q", must_pass: true }
+    gate: { type: check, command: "pytest -q", must_pass: true, report: test_report.json }
     on_fail: { retry: 3, then: review }
   - id: review
     parallel:
       - agent: reviewer
       - agent: security
+    gate:
+      type: artifact_valid
+      artifacts:
+        - { artifact: review.json, schema: agents/reviewer/review.schema.json }
+        - { artifact: security_report.json, schema: agents/security/security_report.schema.json }
+    pass_when:
+      - { artifact: review.json, path: verdict, equals: pass }
+      - { artifact: security_report.json, path: verdict, equals: pass }
     on_fail: { goto: implement, max_loops: 2 }
   - id: docs
     agent: docs
   - id: integrate
     type: builtin.merge
-    gate: human_approval
+    gate: human_approval          # evaluated before delivery for builtin.merge

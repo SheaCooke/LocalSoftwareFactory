@@ -35,6 +35,8 @@ class AgentResult:
     outputs: list[str] = field(default_factory=list)
     error: str | None = None
     transcript: Path | None = None
+    #: Set when a run/stage budget (not the agent's own max_tokens_budget) stopped it.
+    budget_exceeded: str | None = None
 
 
 class AgentRuntime:
@@ -63,12 +65,15 @@ class AgentRuntime:
             final: str | None = None
             for iteration in range(1, spec.max_iterations + 1):
                 result.iterations = iteration
+                if ctx.budget_check is not None and (reason := ctx.budget_check()):
+                    result.budget_exceeded = reason
+                    raise _Fail(reason)
                 resolved, response = self.resolver.complete(
                     messages,
                     tool_specs or None,
                     agent=spec.name,
                     agent_default=ctx.model_default or spec.model,
-                    run_override=ctx.model_override,
+                    run_override=ctx.current_model_override(),
                     metadata={"agent": spec.name, "stage": ctx.stage_id, "run": ctx.run_id},
                 )
                 cost = resolved.model.pricing.cost(

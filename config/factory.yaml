@@ -22,7 +22,8 @@ paths:                       # relative to the repository root
   pipelines: config/pipelines
 
 limits:
-  max_parallel_agents: 4
+  max_parallel_agents: 4            # branches of a parallel stage run concurrently up to this
+  network_approval_timeout_s: 600   # an L3 agent waits this long for network approval
 
 sandbox:
   backend: auto              # auto | docker | subprocess (auto: Docker if ready, else subprocess)

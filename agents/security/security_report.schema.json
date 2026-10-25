@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "security_report.json (security agent)",
+  "type": "object",
+  "required": ["verdict", "summary", "findings"],
+  "properties": {
+    "verdict": { "enum": ["pass", "fail"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "category", "evidence", "fix"],
+        "properties": {
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "category": {
+            "enum": ["secrets", "injection", "file", "deserialization", "dependency", "validation", "network"]
+          },
+          "file": { "type": "string" },
+          "line": { "type": ["integer", "null"] },
+          "evidence": { "type": "string" },
+          "impact": { "type": "string" },
+          "fix": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -107,11 +107,11 @@ def test_model_switch_between_stages_applies_to_next_call(factory_root: Path) ->
     assert used == [("requirements", "echo"), ("architect", "echo-b"), ("planner", "echo")]
 
 
-def test_default_pipeline_rejected_until_milestone_4(factory_root: Path) -> None:
+def test_missing_schema_file_blocks_run(factory_root: Path) -> None:
+    (factory_root / "agents" / "reviewer" / "review.schema.json").unlink()
     orch, _, _ = make_orchestrator(factory_root)
-    with pytest.raises(PipelineError, match="milestone 4") as info:
+    with pytest.raises(PipelineError, match=r"schema 'agents/reviewer/review\.schema\.json'"):
         orch.create_run("x", pipeline="default")
-    assert "human_approval" in str(info.value) and "parallel" in str(info.value)
     assert orch.store.list_runs() == []
 
 
