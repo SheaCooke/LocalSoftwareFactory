@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the primary target. Ubuntu adds the Docker sandbox tests:
+        # GitHub's Windows runners cannot run Linux containers.
+        os: [windows-latest, ubuntu-latest]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install Python 3.12 and dependencies
+        run: |
+          uv python install 3.12
+          uv sync
+
+      - name: Build the Docker sandbox image
+        if: runner.os == 'Linux'
+        run: uv run factory sandbox build
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy factory
+
+      - name: Test (Fake provider only, no API keys)
+        run: uv run pytest -rs
+
+      - name: Smoke-test the CLI
+        run: |
+          uv run factory pipelines list
+          uv run factory sandbox status
+          uv run factory run start "A CLI todo app with add, list and done commands" --pipeline quick --model demo

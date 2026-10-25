@@ -93,18 +93,26 @@ only through the permission layer, and on commands only through a sandbox.
   publishes a `config.error` event. The UI shows this as a banner.
 - `LiveConfig.refresh()` re-reads only when a config file's mtime or size changed
   (three `stat` calls). The resolver calls it before every model resolution, so an
-  edit made by any process applies to the next LLM call with no watcher. The M6
-  file watcher only pushes the change to the UI.
+  edit made by any process applies to the next LLM call, even without the watcher.
+- **Hot reload** (`factory/core/watcher.py`): while `factory up` runs, a polling
+  watcher (1 s, stat-based, D52) watches `config/*.yaml`, `config/pipelines/*.yaml`,
+  `agents/*/agent.md` and `agents/*/*.json`. A change reloads config, agents or
+  pipelines and emits `config.reloaded` / `config.error` / `agents.reloaded` /
+  `pipelines.reloaded`, which the UI turns into refreshes, notices and banners.
+  Agent files are also re-read at the start of every invocation, so edits apply to
+  an agent's next turn with or without the watcher.
 - Runtime overrides (`factory model use`, UI dropdown) write to
-  `config/factory.yaml`, so the CLI, UI and file edits share one source of truth.
-  The watcher picks up the write. Per-run overrides live in the run row in SQLite.
+  `config/overrides.yaml` (D3), not `factory.yaml`, so your comments survive. The
+  CLI, UI and file edits share the same files. Per-run overrides live in the run
+  row in SQLite and are re-read before every LLM call (D47).
 
 ### Model resolution
 
 `ModelResolver.resolve(agent, run)` runs on **every** LLM call:
 
 ```
-per-run override  →  per-agent override (factory.yaml)  →  agent.md `model:`  →  default_model
+per-run override  →  per-agent override (overrides.yaml, then factory.yaml)
+                  →  pipeline stage `model:` / agent.md `model:`  →  default_model
 ```
 
 It returns a `ResolvedModel` (alias, provider config, model id, params,
@@ -136,22 +144,42 @@ class LLMProvider(ABC):
 
 One instance serves one endpoint, and the model id is chosen per call (see D6).
 
-Normalized types: `Message(role, content, tool_calls, tool_call_id, name)`,
-`ToolSpec(name, description, parameters: JSON Schema)`,
-`ToolCall(id, name, arguments: dict)`,
-`Usage(input_tokens, output_tokens)`,
-`Response(content, tool_calls, usage, model, finish_reason, raw_latency_ms)`.
+Normalized types:
+- `Message(role, content, tool_calls, tool_call_id, name, native)`
+- `ToolSpec(name, description, parameters: JSON Schema)`
+- `ToolCall(id, name, arguments: dict)`
+- `Usage(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)`
+- `Response(content, tool_calls, usage, model, finish_reason, latency_ms, native)`
 
-- Adapters are thin `httpx` clients with no vendor SDKs. This keeps the dependency
-  surface to `httpx` plus `pydantic`.
-- Providers register by `type` string through a small registry (`@register_provider("openai")`).
-  Adding a provider means adding a module and referencing its type in `models.yaml`.
-- **JSON tool fallback**: when `supports_tools: false`, the runtime (not the adapter)
-  injects a tool-protocol instruction block. It asks the model to reply with
-  `{"tool_calls":[{"name":…,"arguments":{…}}]}` or `{"final": "…"}` and parses the
-  reply into the same `ToolCall` structure. Agents see no difference.
-- **Fake provider**: returns scripted responses keyed by agent/stage from a YAML/JSON
-  script, or echoes the last user message. It is used by every test and the e2e run.
+`finish_reason` is one of `stop`, `tool_calls`, `length` or `refusal`. `native`
+carries provider-specific content of an assistant turn, such as Claude's thinking
+blocks or Gemini's thought signatures. The adapter that produced it sends it back
+verbatim on the next turn; every other adapter ignores it.
+
+**Adapters** (all plain `httpx`, no vendor SDKs, D7):
+
+| Type | Module | Covers |
+|---|---|---|
+| `openai_compat` | `openai_compat.py` | OpenAI, Azure OpenAI, Ollama, LM Studio, vLLM, OpenRouter |
+| `anthropic` | `anthropic.py` | Claude Messages API, version `2026-10-21` (D50) |
+| `gemini` | `gemini.py` | Google Generative Language API (D51) |
+| `fake` | `fake.py` | scripted / echo responses for tests and dry runs |
+
+- `factory/providers/http.py` is shared by the adapters. It does retries with
+  backoff (408/409/429/5xx/529, honouring `retry-after`), redacted error messages,
+  and SSE parsing.
+- Providers register by `type` string (`@register_provider("anthropic")`). Every
+  module in the package is imported on first use, so adding a provider means adding
+  a module and referencing its type in `models.yaml` ([EXTENDING.md §6](EXTENDING.md#6-add-a-provider)).
+- **JSON tool fallback**: when `supports_tools: false`, the resolver (not the
+  adapter) describes the tools in the system prompt. It asks the model to reply with
+  `{"tool_calls":[{"name":…,"arguments":{…}}]}` or plain text, and parses the reply
+  into the same `ToolCall` structure. Agents see no difference.
+- **Cost**: `Pricing.cost()` prices cached input separately (reads 0.1x, writes
+  1.25x by default) when the provider reports cache tokens.
+- **Fake provider**: returns scripted responses matched on agent and/or prompt
+  text from a YAML/JSON script, or echoes the last user message. It is used by every
+  test and by the end-to-end run.
 
 ---
 
@@ -352,12 +380,17 @@ frontend is static `index.html` / `app.js` / `app.css` with no build step.
 | `factory run start "<request>" --pipeline default --repo <path>` | M2 |
 | `factory runs list` / `factory runs show <id>` / `factory runs resume <id>` | M2 |
 | `factory agents list` / `factory pipelines list` | M2 |
-| `factory up` | M5 |
-| `factory new agent <name>` | M6 |
+| `factory runs approvals` / `approve` / `request-changes` / `reject <id>` | M4 |
+| `factory sandbox status` / `factory sandbox build` | M3 |
+| `factory up [--port N] [--no-open] [--no-resume]` | M5 |
+| `factory model reset [--agent <name>] [--all]` | M1 |
+| `factory new agent <name>` / `factory new pipeline <name> [--from <pipeline>]` | M6 |
 
 ---
 
 ## 12. Milestones
+
+Status: all seven milestones are done.
 
 1. **Skeleton**: repo layout, `pyproject.toml`, config models + loader, provider
    interface, Fake + OpenAI-compatible adapters, secrets/redaction, CLI
@@ -369,10 +402,12 @@ frontend is static `index.html` / `app.js` / `app.css` with no build step.
 4. Full pipeline interpreter: gates, parallel stages, retries/goto loops, budgets,
    resume after crash.
 5. Web UI with SSE, model switcher, gate controls, artifact/diff views, `factory up`.
-6. Anthropic + Gemini adapters, file-watcher hot reload, `factory new agent`, full
-   docs (README, EXTENDING, ISOLATION).
-7. E2E test: the default pipeline with the Fake provider builds a small CLI todo app
-   from a one-line request. Optional GitHub Actions on `windows-latest`.
+6. Anthropic + Gemini adapters, file-watcher hot reload, `factory new agent` /
+   `new pipeline`, full docs (README, EXTENDING, ISOLATION).
+7. E2E test (`tests/test_e2e_todo.py`): the default pipeline with the Fake provider
+   builds a small CLI todo app from a one-line request. The scripted transcript is
+   `examples/todo-app/script.yaml`, also available as the offline `demo` model.
+   GitHub Actions on `windows-latest` and `ubuntu-latest`.
 
 Each milestone ends with `pytest`, `ruff check`, and `mypy --strict factory/`
 passing.

@@ -236,16 +236,23 @@ class InhouseProvider(LLMProvider):
         self._client = base.http_client(config)  # trusts the OS certificate store
 
     def complete(
-        self, messages: Sequence[Message], tools: Sequence[ToolSpec] | None = None,
-        *, model: str, **params: Any,
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None = None,
+        *,
+        model: str,
+        **params: Any,
     ) -> Response:
-        params.pop("metadata", None)              # never send factory metadata
+        params.pop("metadata", None)  # never send factory metadata
         started = time.perf_counter()
-        data = post_json(                          # retries 429/5xx with backoff
-            self._client, f"{self.config.base_url}/generate",
+        data = post_json(  # retries 429/5xx with backoff
+            self._client,
+            f"{self.config.base_url}/generate",
             body={"model": model, "prompt": [m.content for m in messages], **params},
             headers={"Authorization": f"Bearer {self.api_key}"},
-            params=None, max_retries=self.config.max_retries, label="inhouse",
+            params=None,
+            max_retries=self.config.max_retries,
+            label="inhouse",
         )
         return Response(
             content=data["text"],

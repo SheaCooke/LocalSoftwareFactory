@@ -321,3 +321,20 @@ There's no dependency, it behaves the same on Windows, Linux and WSL (inotify mi
 Open SSE streams never finish, so uvicorn's graceful shutdown hung on Ctrl+C. It
 now uses `timeout_graceful_shutdown=3`. The port pre-check also mirrors uvicorn's
 `SO_REUSEADDR`, so TIME_WAIT leftovers of a previous run no longer read as "in use".
+
+### D54. One scripted transcript serves the e2e test and an offline demo
+`examples/todo-app/script.yaml` is the LLM side of a complete `default` run. It
+includes a failing check gate, a review loop and blocked out-of-scope writes, so
+the e2e test proves the failure paths as well as the happy path. The `demo` alias
+(a `fake` provider with `options.script`) replays it for every run, keyed by run
+id, so anyone can watch a full run in the UI with no API key.
+
+### D55. The e2e test runs the delivered software
+Pipeline success alone isn't enough. The test clones the `factory/<run>` branch
+from the target repo, runs its test suite, and drives `python -m todo`, including
+the unknown-id case the reviewer caught. It runs under both sandbox backends.
+
+### D56. CI on Windows and Ubuntu
+`windows-latest` is the required target. `ubuntu-latest` is added because GitHub's
+Windows runners can't run Linux containers: the Ubuntu job builds the sandbox image,
+so the Docker isolation tests run in CI too.

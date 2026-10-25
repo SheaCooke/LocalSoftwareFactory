@@ -11,6 +11,10 @@ providers:
   fake:
     type: fake                      # offline, scripted / echo responses
 
+  demo:
+    type: fake                      # replays a scripted transcript for every run
+    options: { script: examples/todo-app/script.yaml }
+
   openai:
     type: openai_compat
     base_url: https://api.openai.com/v1
@@ -56,6 +60,13 @@ models:
     provider: fake
     model: echo
     description: Offline echo model for dry runs and tests
+    supports_tools: true
+    context_window: 1000000
+
+  demo:
+    provider: demo
+    model: demo-todo-app
+    description: Offline demo. With the default pipeline, builds a CLI todo app (no API key)
     supports_tools: true
     context_window: 1000000
 

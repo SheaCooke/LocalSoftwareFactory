@@ -16,6 +16,7 @@ Script file (YAML or JSON), set via `options.script` in models.yaml or passed in
 
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 import threading
@@ -83,16 +84,25 @@ class FakeProvider(LLMProvider):
         self._ids = itertools.count(1)
         self.calls: list[FakeCall] = []
         self.script: list[ScriptEntry] = []
+        # A script named in models.yaml replays from the start for every run (keyed by
+        # metadata["run"]), so a demo alias works for any number of runs in one process.
+        self._per_run_template: list[ScriptEntry] = []
+        self._per_run: dict[str, list[ScriptEntry]] = {}
         script = config.options.get("script")
         if script:
-            self.load_script(root / Path(str(script)))
+            self._per_run_template = self.read_script(root / Path(str(script)))
 
-    def load_script(self, path: Path) -> None:
+    @staticmethod
+    def read_script(path: Path) -> list[ScriptEntry]:
         text = path.read_text(encoding="utf-8")
         raw = json.loads(text) if path.suffix == ".json" else yaml.safe_load(text)
         if not isinstance(raw, list):
             raise ProviderError(f"fake script {path} must be a list of entries")
-        self.add_script([ScriptEntry.from_dict(e) for e in raw])
+        return [ScriptEntry.from_dict(e) for e in raw]
+
+    def load_script(self, path: Path) -> None:
+        """Append a script file to the shared (not per-run) queue."""
+        self.add_script(self.read_script(path))
 
     def add_script(self, entries: Sequence[ScriptEntry | dict[str, Any]]) -> None:
         with self._lock:
@@ -101,17 +111,27 @@ class FakeProvider(LLMProvider):
                     entry if isinstance(entry, ScriptEntry) else ScriptEntry.from_dict(entry)
                 )
 
-    def _pick(self, agent: str | None, prompt: str) -> dict[str, Any] | None:
-        with self._lock:
-            for i, entry in enumerate(self.script):
-                if entry.agent and entry.agent != agent:
-                    continue
-                if entry.contains and entry.contains not in prompt:
-                    continue
-                if not entry.repeat:
-                    del self.script[i]
-                return entry.response
+    @staticmethod
+    def _take(queue: list[ScriptEntry], agent: str | None, prompt: str) -> dict[str, Any] | None:
+        for i, entry in enumerate(queue):
+            if entry.agent and entry.agent != agent:
+                continue
+            if entry.contains and entry.contains not in prompt:
+                continue
+            if not entry.repeat:
+                del queue[i]
+            return entry.response
         return None
+
+    def _pick(
+        self, agent: str | None, prompt: str, run: str | None = None
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            found = self._take(self.script, agent, prompt)
+            if found is None and self._per_run_template:
+                queue = self._per_run.setdefault(run or "", copy.deepcopy(self._per_run_template))
+                found = self._take(queue, agent, prompt)
+            return found
 
     def complete(
         self,
@@ -124,7 +144,7 @@ class FakeProvider(LLMProvider):
         metadata = dict(params.pop("metadata", None) or {})
         self.calls.append(FakeCall(list(messages), list(tools or ()), model, params, metadata))
         prompt = _last_user(messages)
-        scripted = self._pick(metadata.get("agent"), prompt)
+        scripted = self._pick(metadata.get("agent"), prompt, metadata.get("run"))
         calls: tuple[ToolCall, ...]
         if scripted is None:
             content, calls = f"[{model}] {prompt}", ()

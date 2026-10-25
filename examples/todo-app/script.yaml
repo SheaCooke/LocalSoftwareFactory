@@ -1,0 +1,547 @@
+# Scripted LLM transcript for the default pipeline building a CLI todo app.
+#
+# Used by the end-to-end test (tests/test_e2e_todo.py) and by the offline `demo`
+# model alias, so you can watch a whole run in the UI without an API key:
+#
+#   uv run factory run start "A CLI todo app with add, list and done commands" --model demo
+#
+# Entries are consumed in order per agent (match.agent). The run deliberately takes
+# the scenic route: the first implementation fails the `pytest -q` check gate and is
+# retried with the failures as feedback; the reviewer then finds a crash and sends
+# the work back (goto implement); along the way agents try to touch files outside
+# their scope and are denied.
+
+# ------------------------------------------------------------------ requirements
+- match: { agent: requirements }
+  response:
+    content: |
+      # Requirements: CLI todo list
+
+      ## Goal
+      A single-user command-line todo list that keeps items between runs.
+
+      ## Actors
+      - A developer working in a terminal.
+
+      ## Functional requirements
+      ### FR-1 Add
+      `todo add "<text>"` appends a new, not-done item with the next id (1, 2, ...).
+      **Acceptance criteria**
+      - AC-1.1 Given an empty list, When I run `todo add "buy milk"`, Then item 1 "buy milk" exists and is not done.
+
+      ### FR-2 List
+      `todo list` prints one line per item: `<id> [ ] <text>` or `<id> [x] <text>`.
+      **Acceptance criteria**
+      - AC-2.1 Given items 1 "buy milk" and 2 "walk dog", When I list, Then the output contains `1 [ ] buy milk` and `2 [ ] walk dog`.
+      - AC-2.2 Given no items, When I list, Then the output says `no todos`.
+
+      ### FR-3 Done
+      `todo done <id>` marks the item done.
+      **Acceptance criteria**
+      - AC-3.1 Given item 1, When I run `todo done 1`, Then listing shows `1 [x] buy milk`.
+      - AC-3.2 Given no item 99, When I run `todo done 99`, Then the exit code is 1 and stderr says `error: no todo with id 99`.
+
+      ### FR-4 Persistence
+      Items are stored as JSON in `$TODO_FILE`, defaulting to `~/.todo.json`.
+      **Acceptance criteria**
+      - AC-4.1 Given `TODO_FILE` is set, When I add an item, Then that file contains a JSON list with the item.
+
+      ## Non-functional requirements
+      - NFR-1 Python 3.10+, standard library only; works on Windows and Linux.
+
+      ## In scope / Out of scope
+      In: add, list, done. Out: delete, priorities, due dates, sync.
+
+      ## Assumptions
+      - Ids are never reused within a list.
+
+      ## Open questions
+      - None for the first version.
+
+# ----------------------------------------------------------------------- design
+- match: { agent: architect }
+  response:
+    content: |
+      # Design: CLI todo list
+
+      ## Overview
+      One package, `todo`, with an argparse CLI over a JSON file.
+
+      ## Technology choices
+      - Python 3.10+, standard library only (argparse, json, pathlib). Tests: pytest.
+
+      ## Project layout
+      ```
+      pyproject.toml          # pytest config: pythonpath = ["src"]
+      src/todo/__init__.py
+      src/todo/__main__.py    # python -m todo
+      src/todo/cli.py         # main(argv) -> int
+      tests/test_todo.py
+      ```
+
+      ## Components
+      ### todo.cli (covers FR-1..FR-4)
+      ```python
+      def main(argv: list[str] | None = None) -> int: ...
+      def store_path() -> Path: ...   # $TODO_FILE or ~/.todo.json
+      ```
+      Items are `{"id": int, "text": str, "done": bool}` in a JSON list.
+
+      ## Error handling
+      Unknown id: print `error: no todo with id <id>` to stderr, return 1.
+
+      ## Test strategy
+      `pytest -q`; tests call `main([...])` with `TODO_FILE` pointed at a temp file.
+
+      ## Traceability
+      | FR | Interface |
+      |---|---|
+      | FR-1..FR-3 | `todo.cli.main` subcommands add / list / done |
+      | FR-4 | `todo.cli.store_path`, JSON file |
+
+# ------------------------------------------------------------------------- plan
+- match: { agent: planner }
+  response:
+    content: |
+      # Plan: CLI todo list
+
+      ## Tasks
+      ### T1 Scaffold
+      - Files: pyproject.toml, src/todo/__init__.py, src/todo/__main__.py
+      - Done when: `python -m todo --help` works.
+      ### T2 Storage + add/list/done
+      - Files: src/todo/cli.py
+      - Satisfies: AC-1.1, AC-2.1, AC-2.2, AC-3.1, AC-3.2, AC-4.1
+      - Done when: tests/test_todo.py passes.
+
+      ## Test checklist
+      - tests/test_todo.py::test_add_and_list → AC-1.1, AC-2.1
+      - tests/test_todo.py::test_list_empty → AC-2.2
+      - tests/test_todo.py::test_done_marks_item → AC-3.1
+      - tests/test_todo.py::test_persists_as_json → AC-4.1
+
+      ## Risks
+      - AC-3.2 (unknown id) has no automated test in the checklist; review must check it.
+
+# ------------------------------------------------------------------------ tester
+- match: { agent: tester }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments:
+          path: pyproject.toml
+          content: |
+            [project]
+            name = "todo"
+            version = "0.1.0"
+            requires-python = ">=3.10"
+
+            [tool.pytest.ini_options]
+            pythonpath = ["src"]
+            testpaths = ["tests"]
+- match: { agent: tester }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments:
+          path: tests/test_todo.py
+          content: |
+            """Tests for the todo CLI (written before the implementation exists)."""
+
+            import json
+
+            import pytest
+
+            from todo.cli import main
+
+
+            @pytest.fixture
+            def db(tmp_path, monkeypatch):
+                path = tmp_path / "todos.json"
+                monkeypatch.setenv("TODO_FILE", str(path))
+                return path
+
+
+            def test_add_and_list(db, capsys):
+                """AC-1.1, AC-2.1"""
+                assert main(["add", "buy milk"]) == 0
+                assert main(["add", "walk dog"]) == 0
+                capsys.readouterr()
+                assert main(["list"]) == 0
+                out = capsys.readouterr().out
+                assert "1 [ ] buy milk" in out
+                assert "2 [ ] walk dog" in out
+
+
+            def test_list_empty(db, capsys):
+                """AC-2.2"""
+                assert main(["list"]) == 0
+                assert "no todos" in capsys.readouterr().out
+
+
+            def test_done_marks_item(db, capsys):
+                """AC-3.1"""
+                main(["add", "buy milk"])
+                assert main(["done", "1"]) == 0
+                capsys.readouterr()
+                main(["list"])
+                assert "1 [x] buy milk" in capsys.readouterr().out
+
+
+            def test_persists_as_json(db):
+                """AC-4.1"""
+                main(["add", "x"])
+                assert json.loads(db.read_text(encoding="utf-8"))[0]["text"] == "x"
+# The tester tries to stub production code: blocked by fs_scope (deny src/**).
+- match: { agent: tester }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments: { path: src/todo/cli.py, content: "def main(argv=None):\n    return 0\n" }
+- match: { agent: tester }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: test_plan.md
+          content: |
+            # Test plan
+            | Test | AC | Asserts |
+            |---|---|---|
+            | test_add_and_list | AC-1.1, AC-2.1 | ids and `[ ]` markers in list output |
+            | test_list_empty | AC-2.2 | `no todos` |
+            | test_done_marks_item | AC-3.1 | `[x]` after done |
+            | test_persists_as_json | AC-4.1 | JSON file content |
+
+            Run: `pytest -q`. Tests import `todo.cli.main`; `pythonpath = ["src"]` is set in pyproject.toml.
+- match: { agent: tester }
+  response: { content: "Wrote 4 tests in tests/test_todo.py and pytest config in pyproject.toml." }
+
+# ------------------------------------------- implementer, attempt 1 (fails the gate)
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - { name: fs.read, arguments: { path: tests/test_todo.py } }
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments: { path: src/todo/__init__.py, content: "\"\"\"A tiny command-line todo list.\"\"\"\n" }
+      - name: fs.write
+        arguments:
+          path: src/todo/__main__.py
+          content: |
+            from todo.cli import main
+
+            raise SystemExit(main())
+      - name: fs.write
+        arguments:
+          path: src/todo/cli.py
+          content: |
+            """Command-line todo list: add, list and done."""
+
+            import argparse
+            import json
+            import os
+            from pathlib import Path
+
+
+            def store_path():
+                return Path(os.environ.get("TODO_FILE") or Path.home() / ".todo.json")
+
+
+            def main(argv=None):
+                parser = argparse.ArgumentParser(prog="todo")
+                sub = parser.add_subparsers(dest="command", required=True)
+                sub.add_parser("add").add_argument("text")
+                sub.add_parser("list")
+                sub.add_parser("done").add_argument("id", type=int)
+                args = parser.parse_args(argv)
+                path = store_path()
+                todos = json.loads(path.read_text()) if path.exists() else []
+                if args.command == "add":
+                    todos.append({"id": len(todos) + 1, "text": args.text, "done": False})
+                elif args.command == "list":
+                    for item in todos:
+                        print(f"[{'x' if item['done'] else ' '}] {item['id']} {item['text']}")
+                else:
+                    todos[args.id - 1]["done"] = True
+                path.write_text(json.dumps(todos))
+                return 0
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - { name: shell.run_sandboxed, arguments: { command: "pytest -q" } }
+# Tests fail; the implementer tries to "fix" them instead: denied (deny tests/**).
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments: { path: tests/test_todo.py, content: "def test_nothing():\n    pass\n" }
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: implementation_summary.md
+          content: "First pass at src/todo/cli.py; some tests still fail.\n"
+- match: { agent: implementer }
+  response: { content: "Implemented add/list/done; list formatting still needs work." }
+
+# ------------------------------- implementer, attempt 2 (retry: passes the gate)
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments:
+          path: src/todo/cli.py
+          content: |
+            """Command-line todo list: add, list and done."""
+
+            import argparse
+            import json
+            import os
+            from pathlib import Path
+
+
+            def store_path():
+                return Path(os.environ.get("TODO_FILE") or Path.home() / ".todo.json")
+
+
+            def main(argv=None):
+                parser = argparse.ArgumentParser(prog="todo")
+                sub = parser.add_subparsers(dest="command", required=True)
+                sub.add_parser("add").add_argument("text")
+                sub.add_parser("list")
+                sub.add_parser("done").add_argument("id", type=int)
+                args = parser.parse_args(argv)
+                path = store_path()
+                todos = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+                if args.command == "add":
+                    todos.append({"id": len(todos) + 1, "text": args.text, "done": False})
+                elif args.command == "list":
+                    if not todos:
+                        print("no todos")
+                    for item in todos:
+                        print(f"{item['id']} [{'x' if item['done'] else ' '}] {item['text']}")
+                else:
+                    todos[args.id - 1]["done"] = True
+                path.write_text(json.dumps(todos), encoding="utf-8")
+                return 0
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - { name: shell.run_sandboxed, arguments: { command: "pytest -q" } }
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: implementation_summary.md
+          content: |
+            # Implementation summary
+            - T1/T2: src/todo/{__init__,__main__,cli}.py
+            - Tests: 4 passed (`pytest -q`).
+- match: { agent: implementer }
+  response: { content: "All 4 tests pass." }
+
+# ------------------------------------------------- review round 1 (sends work back)
+- match: { agent: reviewer }
+  response:
+    tool_calls:
+      - { name: git.diff, arguments: {} }
+- match: { agent: reviewer }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: review.json
+          content: |
+            {
+              "verdict": "fail",
+              "summary": "Add/list/done work and tests pass, but AC-3.2 is not met: `done` with an unknown id raises IndexError instead of printing an error and exiting 1.",
+              "requirements_coverage": [
+                {"id": "FR-1", "implemented": true, "tested": true, "notes": ""},
+                {"id": "FR-2", "implemented": true, "tested": true, "notes": ""},
+                {"id": "FR-3", "implemented": false, "tested": false, "notes": "AC-3.2 missing"},
+                {"id": "FR-4", "implemented": true, "tested": true, "notes": ""}
+              ],
+              "findings": [
+                {"severity": "major", "file": "src/todo/cli.py", "line": 27,
+                 "issue": "todos[args.id - 1] crashes (or marks the wrong item) for an unknown id",
+                 "suggestion": "look the item up by id; if missing print 'error: no todo with id N' to stderr and return 1"}
+              ]
+            }
+# The reviewer is read-only: fs.write is not even among its tools.
+- match: { agent: reviewer }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments: { path: src/todo/cli.py, content: "# fixed by reviewer\n" }
+- match: { agent: reviewer }
+  response: { content: "Verdict: fail (AC-3.2)." }
+
+- match: { agent: security }
+  response:
+    tool_calls:
+      - { name: git.diff, arguments: {} }
+- match: { agent: security }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: security_report.json
+          content: '{"verdict": "pass", "summary": "Standard library only; no shell, network, eval or unsafe deserialization. JSON is parsed with json.loads.", "findings": []}'
+- match: { agent: security }
+  response: { content: "No security issues." }
+
+# --------------------------------------- implementer, after review (loop back)
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments:
+          path: src/todo/cli.py
+          content: |
+            """Command-line todo list: add, list and done."""
+
+            from __future__ import annotations
+
+            import argparse
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+
+            def store_path() -> Path:
+                """Where todos are kept: $TODO_FILE, or ~/.todo.json."""
+                return Path(os.environ.get("TODO_FILE") or Path.home() / ".todo.json")
+
+
+            def load(path: Path) -> list[dict]:
+                if not path.exists():
+                    return []
+                return json.loads(path.read_text(encoding="utf-8"))
+
+
+            def save(path: Path, todos: list[dict]) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(todos, indent=2), encoding="utf-8")
+
+
+            def main(argv: list[str] | None = None) -> int:
+                parser = argparse.ArgumentParser(prog="todo", description="A tiny todo list.")
+                sub = parser.add_subparsers(dest="command", required=True)
+                sub.add_parser("add", help="add a todo").add_argument("text")
+                sub.add_parser("list", help="list todos")
+                sub.add_parser("done", help="mark a todo as done").add_argument("id", type=int)
+                args = parser.parse_args(argv)
+
+                path = store_path()
+                todos = load(path)
+                if args.command == "add":
+                    todos.append({"id": len(todos) + 1, "text": args.text, "done": False})
+                    save(path, todos)
+                    print(f"added {len(todos)}: {args.text}")
+                elif args.command == "list":
+                    if not todos:
+                        print("no todos")
+                    for item in todos:
+                        mark = "x" if item["done"] else " "
+                        print(f"{item['id']} [{mark}] {item['text']}")
+                else:
+                    match = next((t for t in todos if t["id"] == args.id), None)
+                    if match is None:
+                        print(f"error: no todo with id {args.id}", file=sys.stderr)
+                        return 1
+                    match["done"] = True
+                    save(path, todos)
+                    print(f"done {args.id}")
+                return 0
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - { name: shell.run_sandboxed, arguments: { command: "pytest -q" } }
+- match: { agent: implementer }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: implementation_summary.md
+          content: |
+            # Implementation summary
+            - T1/T2: src/todo/{__init__,__main__,cli}.py
+            - Review fix: `done` looks items up by id; unknown id prints
+              `error: no todo with id N` to stderr and exits 1 (AC-3.2).
+            - Tests: 4 passed (`pytest -q`).
+- match: { agent: implementer }
+  response: { content: "Fixed the unknown-id crash from review; all tests pass." }
+
+# ------------------------------------------------------- review round 2 (passes)
+- match: { agent: reviewer }
+  response:
+    tool_calls:
+      - { name: fs.read, arguments: { path: src/todo/cli.py } }
+- match: { agent: reviewer }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: review.json
+          content: '{"verdict": "pass", "summary": "All FRs implemented; AC-3.2 now handled. Tests pass.", "findings": [{"severity": "nit", "file": "src/todo/cli.py", "issue": "AC-3.2 has no automated test", "suggestion": "add a test for done with an unknown id"}]}'
+- match: { agent: reviewer }
+  response: { content: "Verdict: pass." }
+
+- match: { agent: security }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments:
+          name: security_report.json
+          content: '{"verdict": "pass", "summary": "No new risks in the review fix.", "findings": []}'
+- match: { agent: security }
+  response: { content: "Still clean." }
+
+# ------------------------------------------------------------------------- docs
+- match: { agent: docs }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments:
+          path: README.md
+          content: |
+            # todo
+
+            A tiny command-line todo list. Items are kept as JSON in `$TODO_FILE`
+            (default `~/.todo.json`). Python 3.10+, no dependencies.
+
+            ## Usage
+
+            ```powershell
+            $env:PYTHONPATH = "src"     # or: pip install -e .
+            python -m todo add "buy milk"
+            python -m todo list         # 1 [ ] buy milk
+            python -m todo done 1
+            ```
+
+            `done` with an unknown id prints an error and exits with code 1.
+
+            ## Tests
+
+            ```powershell
+            pytest -q
+            ```
+# Docs may write README.md and docs/**, never code.
+- match: { agent: docs }
+  response:
+    tool_calls:
+      - name: fs.write
+        arguments: { path: src/todo/cli.py, content: "# docs edit\n" }
+- match: { agent: docs }
+  response:
+    tool_calls:
+      - name: artifact.write
+        arguments: { name: docs_summary.md, content: "README.md: overview, usage, tests.\n" }
+- match: { agent: docs }
+  response: { content: "Wrote README.md." }

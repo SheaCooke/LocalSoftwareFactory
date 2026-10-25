@@ -6,16 +6,41 @@ review → docs → integrate) and produce working code in a target Git reposito
 Agents are isolated from each other by context, filesystem, execution sandbox and
 secrets. You can switch any agent to any model (cloud or local) mid-run, with no restart.
 
-> **Status: Milestone 6 of 7.** Anthropic and Gemini adapters, hot reload of
-> `config/` and `agents/`, and `factory new agent|pipeline` are done (see
-> [docs/EXTENDING.md](docs/EXTENDING.md)). Remaining: the end-to-end todo-app test
-> (milestone 7). Earlier milestones: Config, providers (Fake and OpenAI-compatible),
-> declarative agents, and full isolation all work. So does the complete pipeline
-> interpreter: gates, parallel stages, loops, budgets and resume. `factory up` adds
-> a live web UI with gate controls and model switching. Remaining: Anthropic and
-> Gemini adapters, the config file watcher, `factory new agent` (milestone 6), and
-> the end-to-end todo-app test (milestone 7). See
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/ISOLATION.md](docs/ISOLATION.md).
+> **Status: all 7 milestones done.** What works:
+> - Providers: OpenAI-compatible (also Ollama, LM Studio, vLLM, OpenRouter, Azure),
+>   Anthropic, Gemini, and a Fake provider for offline runs.
+> - Declarative agents and pipelines, with hot reload.
+> - Isolation enforced in code: worktrees, the permission layer, and the Docker or
+>   subprocess sandbox.
+> - A pipeline interpreter with gates, parallel stages, loops, budgets and resume.
+> - A live web UI.
+>
+> The end-to-end test builds a working todo app through the full `default` pipeline
+> with no API key, and the suite runs on Windows and WSL/Linux. Docs:
+> [ARCHITECTURE](docs/ARCHITECTURE.md), [EXTENDING](docs/EXTENDING.md),
+> [ISOLATION](docs/ISOLATION.md), [DECISIONS](docs/DECISIONS.md).
+
+## Try it without an API key
+
+The `demo` model replays a scripted transcript
+([examples/todo-app/script.yaml](examples/todo-app/script.yaml)) through the full
+`default` pipeline. Start `factory up`, enter
+**"A CLI todo app with add, list and done commands"**, pick pipeline `default` and
+model `demo`, and approve the three gates. Along the way you'll see:
+- a failing test gate that gets retried;
+- a review that sends the work back to the implementer;
+- agents being blocked when they try to edit files they don't own;
+- the finished code in the Changes tab.
+
+The same in a terminal:
+
+```bash
+uv run factory run start "A CLI todo app with add, list and done commands" --model demo
+uv run factory runs approve <run-id>     # three times: requirements, design, integrate
+```
+
+Then use real models: put keys in `.env` and pick aliases (`smart`, `claude`,
+`gemini-pro`, `local-coder`, ...) in the UI or with `factory model use`.
 
 ## Quickstart
 
@@ -131,7 +156,15 @@ commands above keep working alongside the UI, against the same database.
 ## Development
 
 ```powershell
-uv run pytest
+uv run pytest            # no API keys needed: every test uses the Fake provider
 uv run ruff check .
-uv run mypy factory
+uv run mypy factory      # strict
 ```
+
+`tests/test_e2e_todo.py` is the end-to-end check. The `default` pipeline builds a
+todo CLI from a one-line request, with real git worktrees, the permission layer
+and the sandbox (Docker too, when available). The test then checks out the
+delivered branch, runs its tests and drives the CLI. CI
+(`.github/workflows/ci.yml`) runs everything on `windows-latest` and
+`ubuntu-latest`. The Ubuntu job builds the sandbox image, so the Docker isolation
+tests run there too.

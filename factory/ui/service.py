@@ -138,7 +138,7 @@ class FactoryService:
                     "agents": sorted(self.orch.agents.agents),
                     "errors": {e.name: e.message for e in self.orch.agents.errors},
                     "changed": [
-                        str(f.relative_to(agents_dir))
+                        f.relative_to(agents_dir).as_posix()  # same on Windows and Linux
                         for f in files
                         if f.is_relative_to(agents_dir)
                     ],
