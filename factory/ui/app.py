@@ -64,15 +64,21 @@ def create_app(
     service: FactoryService | None = None,
     allowed_hosts: frozenset[str] = LOOPBACK_HOSTS,
     resume_interrupted: bool = False,
+    watch: bool = True,
 ) -> FastAPI:
     svc = service or FactoryService(live)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if watch:
+            svc.watcher.start()
         if resume_interrupted:
             svc.runs.resume_interrupted()
-        yield
-        svc.orch.resolver.close()
+        try:
+            yield
+        finally:
+            svc.watcher.stop()
+            svc.orch.resolver.close()
 
     app = FastAPI(
         title="Software Factory", version=__version__, docs_url="/api/docs", lifespan=lifespan

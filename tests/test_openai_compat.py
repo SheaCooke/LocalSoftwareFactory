@@ -111,7 +111,7 @@ def test_no_key_sends_no_auth(tmp_path: Path) -> None:
 
 
 def test_retries_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("factory.providers.openai_compat.time.sleep", lambda s: None)
+    monkeypatch.setattr("factory.providers.http.time.sleep", lambda s: None)
     statuses = iter([503, 429, 200])
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -187,7 +187,7 @@ def test_stream_accumulates_text_tool_calls_and_usage(tmp_path: Path) -> None:
 
 
 def test_unreachable_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("factory.providers.openai_compat.time.sleep", lambda s: None)
+    monkeypatch.setattr("factory.providers.http.time.sleep", lambda s: None)
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)

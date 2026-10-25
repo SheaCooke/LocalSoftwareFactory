@@ -36,6 +36,13 @@ class Message:
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None  # set on role="tool"
     name: str | None = None  # tool name on role="tool"
+    #: Provider-native content of an assistant turn, keyed by provider type (e.g. Claude's
+    #: thinking blocks). The adapter that produced it sends it back verbatim; every
+    #: other adapter ignores it and uses `content` / `tool_calls`.
+    native: tuple[tuple[str, Any], ...] = ()
+
+    def native_for(self, provider_type: str) -> Any:
+        return next((value for key, value in self.native if key == provider_type), None)
 
     @classmethod
     def system(cls, content: str) -> Message:
@@ -65,8 +72,13 @@ class ToolSpec:
 
 @dataclass(frozen=True)
 class Usage:
+    """Token counts. `input_tokens` includes the cached portions, which are also broken
+    out so cost can apply cache pricing."""
+
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -74,7 +86,10 @@ class Usage:
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
-            self.input_tokens + other.input_tokens, self.output_tokens + other.output_tokens
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cache_read_tokens + other.cache_read_tokens,
+            self.cache_write_tokens + other.cache_write_tokens,
         )
 
 
@@ -84,11 +99,12 @@ class Response:
     tool_calls: tuple[ToolCall, ...] = ()
     usage: Usage = field(default_factory=Usage)
     model: str = ""
-    finish_reason: str = "stop"
+    finish_reason: str = "stop"  # stop | tool_calls | length | refusal | ...
     latency_ms: float = 0.0
+    native: tuple[tuple[str, Any], ...] = ()  # see Message.native
 
     def as_message(self) -> Message:
-        return Message.assistant(self.content, self.tool_calls)
+        return Message("assistant", self.content, self.tool_calls, native=self.native)
 
 
 @dataclass(frozen=True)

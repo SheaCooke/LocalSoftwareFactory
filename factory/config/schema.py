@@ -33,9 +33,25 @@ class ProviderConfig(_Strict):
 class Pricing(_Strict):
     input_per_mtok: float = 0.0
     output_per_mtok: float = 0.0
+    #: Prompt-cache pricing as multiples of the input rate (Anthropic: reads 0.1x, writes 1.25x).
+    cache_read_multiplier: float = 0.1
+    cache_write_multiplier: float = 1.25
 
-    def cost(self, input_tokens: int, output_tokens: int) -> float:
-        return (input_tokens * self.input_per_mtok + output_tokens * self.output_per_mtok) / 1e6
+    def cost(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> float:
+        """USD for one call. `input_tokens` includes the cached portions."""
+        uncached = max(0, input_tokens - cache_read_tokens - cache_write_tokens)
+        weighted_input = (
+            uncached
+            + cache_read_tokens * self.cache_read_multiplier
+            + cache_write_tokens * self.cache_write_multiplier
+        )
+        return (weighted_input * self.input_per_mtok + output_tokens * self.output_per_mtok) / 1e6
 
 
 class ModelConfig(_Strict):

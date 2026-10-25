@@ -295,3 +295,29 @@ next agent sees, which is what a reviewer should check.
 ### D49. D34 implemented
 In WSL, `factory up` opens the Windows browser via `wslview`, then `explorer.exe`,
 then Python's `webbrowser`, and always prints the URL.
+
+### D50. Anthropic adapter targets API version 2026-10-21, plain httpx
+It follows D7 (no SDK; the spec allows plain httpx). On this version `temperature`,
+`top_p` and `top_k` are rejected, so the adapter drops them with a warning
+(`options.anthropic_version: 2023-06-01` keeps them). Claude's assistant turns,
+thinking blocks included, are echoed back verbatim via `Message.native`. Parallel
+tool results share one user message. Automatic prompt caching is on, and cache
+reads and writes are priced separately in `Pricing.cost`. The `claude` alias is
+Claude Opus 5.5 with effort `high` and server-side refusal fallbacks
+(`fallbacks: default` + the `server-side-fallback-2026-07-01` beta header).
+Remove both from `models.yaml` to opt out.
+
+### D51. Gemini adapter uses the REST API with schema translation
+JSON Schema is converted to Gemini's OpenAPI subset (uppercase types; unsupported
+keywords dropped). Function calls without ids get generated ids, and model parts
+(with thought signatures) are echoed back verbatim.
+
+### D52. Hot reload is a 1-second stat-polling watcher, not watchdog/inotify
+There's no dependency, it behaves the same on Windows, Linux and WSL (inotify misses
+`/mnt/c`), and the watched set is small. `factory up` runs it; changes emit
+`config.*`, `agents.reloaded` and `pipelines.reloaded` events to the UI.
+
+### D53. `factory up` shuts down within ~3 s even with browsers connected
+Open SSE streams never finish, so uvicorn's graceful shutdown hung on Ctrl+C. It
+now uses `timeout_graceful_shutdown=3`. The port pre-check also mirrors uvicorn's
+`SO_REUSEADDR`, so TIME_WAIT leftovers of a previous run no longer read as "in use".

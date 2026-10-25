@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from factory.cli import app
@@ -117,10 +116,14 @@ def test_missing_api_key_is_clear_error(factory_root: Path) -> None:
     assert "model 'smart' needs OPENAI_API_KEY" in result.stderr
 
 
-def test_unimplemented_provider_type_is_clean_error(
-    factory_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
-    result = runner.invoke(app, ["prompt", "x", "--model", "claude"])
+def test_unimplemented_provider_type_is_clean_error(factory_root: Path) -> None:
+    models = factory_root / "config" / "models.yaml"
+    text = models.read_text("utf-8").replace(
+        "providers:\n", "providers:\n  mystery:\n    type: mystery_api\n", 1
+    )
+    text += "\n  odd:\n    provider: mystery\n    model: m1\n"
+    models.write_text(text, "utf-8")
+    result = runner.invoke(app, ["prompt", "x", "--model", "odd"])
     assert result.exit_code == 1
-    assert "no adapter registered for provider type 'anthropic'" in result.stderr
+    assert "no adapter registered for provider type 'mystery_api'" in result.stderr
+    assert "anthropic" in result.stderr and "gemini" in result.stderr  # listed as available

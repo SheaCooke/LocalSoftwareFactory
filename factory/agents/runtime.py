@@ -76,8 +76,9 @@ class AgentRuntime:
                     run_override=ctx.current_model_override(),
                     metadata={"agent": spec.name, "stage": ctx.stage_id, "run": ctx.run_id},
                 )
+                u = response.usage
                 cost = resolved.model.pricing.cost(
-                    response.usage.input_tokens, response.usage.output_tokens
+                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens
                 )
                 result.usage += response.usage
                 result.cost_usd += cost

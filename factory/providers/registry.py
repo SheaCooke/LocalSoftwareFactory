@@ -12,7 +12,7 @@ from factory.providers.base import LLMProvider, ProviderError
 
 _REGISTRY: dict[str, type[LLMProvider]] = {}
 _discovered = False
-_NOT_ADAPTERS = {"base", "registry", "resolver", "tool_protocol"}
+_NOT_ADAPTERS = {"base", "http", "registry", "resolver", "tool_protocol"}
 
 
 def register_provider(type_name: str) -> Callable[[type[LLMProvider]], type[LLMProvider]]:

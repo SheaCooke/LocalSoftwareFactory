@@ -18,6 +18,7 @@ from factory.isolation.sandboxes.docker_backend import DockerSandbox, build_imag
 from factory.isolation.worktrees import RunRepo
 from factory.providers.base import Message, ProviderError, Response
 from factory.providers.resolver import ModelResolver
+from factory.scaffold import ScaffoldError, new_agent, new_pipeline
 from factory.secrets import redactor
 
 app = typer.Typer(no_args_is_help=True, help="Local, model-agnostic software factory.")
@@ -29,6 +30,8 @@ agents_app = typer.Typer(no_args_is_help=True, help="Inspect agent definitions."
 pipelines_app = typer.Typer(no_args_is_help=True, help="Inspect pipelines.")
 sandbox_app = typer.Typer(no_args_is_help=True, help="Inspect or build the command sandbox.")
 app.add_typer(sandbox_app, name="sandbox")
+new_app = typer.Typer(no_args_is_help=True, help="Scaffold a new agent or pipeline.")
+app.add_typer(new_app, name="new")
 app.add_typer(models_app, name="models")
 app.add_typer(model_app, name="model")
 app.add_typer(run_app, name="run")
@@ -91,7 +94,10 @@ def prompt(
     finally:
         resolver.close()
     if final is not None:
-        cost = resolved.model.pricing.cost(final.usage.input_tokens, final.usage.output_tokens)
+        u = final.usage
+        cost = resolved.model.pricing.cost(
+            u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens
+        )
         typer.secho(
             f"-- {resolved.alias} ({resolved.provider_name}/{resolved.model_id}, "
             f"via {resolved.source.replace('_', ' ')}) "
@@ -531,7 +537,53 @@ def up(
                 typer.echo(f"Open {url} in your browser.")
 
         threading.Timer(1.0, launch).start()
-    uvicorn.run(application, host=ui.host, port=port, log_level="warning")
+    # Open SSE streams never finish on their own; without a graceful-shutdown timeout,
+    # Ctrl+C would hang for as long as a browser tab stays open.
+    uvicorn.run(
+        application, host=ui.host, port=port, log_level="warning", timeout_graceful_shutdown=3
+    )
+
+
+@new_app.command("agent")
+def new_agent_cmd(
+    name: Annotated[str, typer.Argument(help="Agent name: lowercase letters, digits, - or _.")],
+    description: Annotated[str | None, typer.Option("--description", "-d")] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model alias.")] = None,
+    root: RootOption = None,
+) -> None:
+    """Create agents/<name>/agent.md from agents/_template (picked up by hot reload)."""
+    live = _live(root)
+    if model and model not in live.settings.models.models:
+        raise _fail(f"unknown model alias {model!r}")
+    try:
+        path = new_agent(live.settings.path("agents"), name, description=description, model=model)
+    except ScaffoldError as exc:
+        raise _fail(str(exc)) from exc
+    typer.secho(f"created {path}", fg=typer.colors.GREEN)
+    typer.echo(
+        "Next: edit its prompt, inputs/outputs, tools and fs_scope, then add a stage that uses it\n"
+        f"to a pipeline:  - {{id: {name}, agent: {name}}}   (see docs/EXTENDING.md)"
+    )
+
+
+@new_app.command("pipeline")
+def new_pipeline_cmd(
+    name: Annotated[str, typer.Argument(help="Pipeline name (also the file name).")],
+    copy_from: Annotated[
+        str | None, typer.Option("--from", help="Copy an existing pipeline, e.g. default.")
+    ] = None,
+    description: Annotated[str | None, typer.Option("--description", "-d")] = None,
+    root: RootOption = None,
+) -> None:
+    """Create config/pipelines/<name>.yaml (a copy of --from, or a small starter)."""
+    live = _live(root)
+    try:
+        path = new_pipeline(
+            live.settings.path("pipelines"), name, copy_from=copy_from, description=description
+        )
+    except ScaffoldError as exc:
+        raise _fail(str(exc)) from exc
+    typer.secho(f"created {path}", fg=typer.colors.GREEN)
 
 
 @sandbox_app.command("status")

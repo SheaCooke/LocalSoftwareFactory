@@ -20,7 +20,12 @@ def is_wsl() -> bool:
 
 
 def port_free(host: str, port: int) -> bool:
+    """True if a server could listen on host:port now (same semantics as uvicorn)."""
     with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as sock:
+        if sys.platform != "win32":
+            # Ignore TIME_WAIT leftovers of a previous run, as uvicorn does. (On Windows,
+            # SO_REUSEADDR would allow binding over a live listener, so it is not set.)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
         except OSError:

@@ -27,22 +27,9 @@ from factory.providers.base import (
     ToolSpec,
     Usage,
 )
+from factory.providers.http import parse_arguments, post_json, stream_sse
 from factory.providers.registry import register_provider
 from factory.secrets import redactor
-
-_RETRYABLE = {408, 409, 429, 500, 502, 503, 504}
-
-
-def _parse_arguments(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return {"_raw": raw}  # surfaced to the agent as an argument error by the runtime
-    return parsed if isinstance(parsed, dict) else {"_raw": raw}
 
 
 @register_provider("openai_compat")
@@ -119,17 +106,6 @@ class OpenAICompatProvider(LLMProvider):
             ]
         return body
 
-    def _error(self, resp: httpx.Response) -> ProviderError:
-        try:
-            body = resp.read().decode("utf-8", "replace")[:2000]
-        except httpx.HTTPError:
-            body = ""
-        return ProviderError(
-            redactor.redact(f"{self.type_name} HTTP {resp.status_code} from {self._url}: {body}"),
-            status=resp.status_code,
-            retryable=resp.status_code in _RETRYABLE,
-        )
-
     # ----------------------------------------------------------------------- completion
 
     def complete(
@@ -143,26 +119,16 @@ class OpenAICompatProvider(LLMProvider):
         codec = ToolNameCodec(tools)
         body = self._body(messages, tools, model, dict(params), codec)
         started = time.perf_counter()
-        attempt = 0
-        while True:
-            try:
-                resp = self._client.post(
-                    self._url, json=body, headers=self._headers(), params=self.config.query_params
-                )
-            except httpx.TransportError as exc:
-                error = ProviderError(
-                    redactor.redact(f"cannot reach {self._url}: {exc}"), retryable=True
-                )
-            else:
-                if resp.status_code < 400:
-                    break
-                error = self._error(resp)
-            if not error.retryable or attempt >= self.config.max_retries:
-                raise error
-            attempt += 1
-            time.sleep(min(0.5 * 2**attempt, 8.0))
-        latency = (time.perf_counter() - started) * 1000
-        return self._parse(resp.json(), model, codec, latency)
+        data = post_json(
+            self._client,
+            self._url,
+            body=body,
+            headers=self._headers(),
+            params=self.config.query_params,
+            max_retries=self.config.max_retries,
+            label=self.type_name,
+        )
+        return self._parse(data, model, codec, (time.perf_counter() - started) * 1000)
 
     @staticmethod
     def _usage(raw: dict[str, Any] | None) -> Usage:
@@ -183,7 +149,7 @@ class OpenAICompatProvider(LLMProvider):
             ToolCall(
                 id=str(tc.get("id") or f"call_{i}"),
                 name=codec.decode(tc["function"]["name"]),
-                arguments=_parse_arguments(tc["function"].get("arguments")),
+                arguments=parse_arguments(tc["function"].get("arguments")),
             )
             for i, tc in enumerate(message.get("tool_calls") or ())
         )
@@ -214,50 +180,38 @@ class OpenAICompatProvider(LLMProvider):
         text: list[str] = []
         partial: dict[int, dict[str, str]] = {}  # index -> {id, name, arguments}
         usage, finish, served_model = Usage(), "stop", model
-        try:
-            with self._client.stream(
-                "POST",
-                self._url,
-                json=body,
-                headers=self._headers(),
-                params=self.config.query_params,
-            ) as resp:
-                if resp.status_code >= 400:
-                    raise self._error(resp)
-                for line in resp.iter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        break
-                    event = json.loads(payload)
-                    served_model = str(event.get("model") or served_model)
-                    if event.get("usage"):
-                        usage = self._usage(event["usage"])
-                    for choice in event.get("choices") or ():
-                        delta = choice.get("delta") or {}
-                        if delta.get("content"):
-                            text.append(delta["content"])
-                            yield StreamChunk(text=delta["content"])
-                        for tc in delta.get("tool_calls") or ():
-                            slot = partial.setdefault(
-                                int(tc.get("index", 0)), {"id": "", "name": "", "arguments": ""}
-                            )
-                            fn = tc.get("function") or {}
-                            slot["id"] = tc.get("id") or slot["id"]
-                            slot["name"] += fn.get("name") or ""
-                            slot["arguments"] += fn.get("arguments") or ""
-                        if choice.get("finish_reason"):
-                            finish = str(choice["finish_reason"])
-        except httpx.TransportError as exc:
-            raise ProviderError(
-                redactor.redact(f"cannot reach {self._url}: {exc}"), retryable=True
-            ) from exc
+        events = stream_sse(
+            self._client,
+            self._url,
+            body=body,
+            headers=self._headers(),
+            params=self.config.query_params,
+            label=self.type_name,
+        )
+        for _, event in events:
+            served_model = str(event.get("model") or served_model)
+            if event.get("usage"):
+                usage = self._usage(event["usage"])
+            for choice in event.get("choices") or ():
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    text.append(delta["content"])
+                    yield StreamChunk(text=delta["content"])
+                for tc in delta.get("tool_calls") or ():
+                    slot = partial.setdefault(
+                        int(tc.get("index", 0)), {"id": "", "name": "", "arguments": ""}
+                    )
+                    fn = tc.get("function") or {}
+                    slot["id"] = tc.get("id") or slot["id"]
+                    slot["name"] += fn.get("name") or ""
+                    slot["arguments"] += fn.get("arguments") or ""
+                if choice.get("finish_reason"):
+                    finish = str(choice["finish_reason"])
         calls = tuple(
             ToolCall(
                 id=slot["id"] or f"call_{i}",
                 name=codec.decode(slot["name"]),
-                arguments=_parse_arguments(slot["arguments"]),
+                arguments=parse_arguments(slot["arguments"]),
             )
             for i, slot in sorted(partial.items())
         )

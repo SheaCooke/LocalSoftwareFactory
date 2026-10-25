@@ -695,11 +695,32 @@ function connect() {
       refreshModelsSoon();
       refreshStatusSoon();
     }
+    // Hot reload: files under config/ or agents/ changed on disk.
+    if (e.type === "config.reloaded") toast("Config reloaded");
+    if (e.type === "config.error") toast("Config error. The last good config is still active.", true);
+    if (e.type === "agents.reloaded") {
+      refreshModelsSoon();
+      refreshStatusSoon();
+      refreshPipelinesSoon();
+      const changed = (e.data.changed || []).join(", ");
+      const broken = Object.keys(e.data.errors || {});
+      toast(broken.length ? `Agent definitions reloaded, ${broken.length} invalid` : `Agents reloaded${changed ? ": " + changed : ""}`, broken.length > 0);
+    }
+    if (e.type === "pipelines.reloaded") {
+      refreshPipelinesSoon();
+      refreshStatusSoon();
+    }
   };
 }
 
+async function loadPipelines() {
+  state.pipelines = await api("/api/pipelines");
+  renderPipelines();
+}
+const refreshPipelinesSoon = debounce(loadPipelines, 300);
+
 async function init() {
-  await Promise.all([loadStatus(), loadModels(), (async () => { state.pipelines = await api("/api/pipelines"); renderPipelines(); })(), refreshRuns()]);
+  await Promise.all([loadStatus(), loadModels(), loadPipelines(), refreshRuns()]);
   connect();
   setInterval(loadStatus, 5000); // config / agent file edits show up even without events
   setInterval(() => state.runs.length && renderRunList(), 30000); // relative times

@@ -19,6 +19,7 @@ from factory.core.artifacts import ArtifactError
 from factory.core.orchestrator import Orchestrator
 from factory.core.pipeline import PipelineError, PipelineSpec, StageSpec
 from factory.core.store import ApprovalRecord, RunRecord
+from factory.core.watcher import FileWatcher
 from factory.isolation.sandboxes import SandboxError, select_backend
 from factory.isolation.worktrees import GitError, RunRepo
 from factory.ui.broadcast import Broadcaster
@@ -101,14 +102,57 @@ class FactoryService:
         self.runs = RunManager(self.orch)
         self._config_error: str | None = None
         live.subscribe(self._on_config)
+        settings = live.settings
+        self.watcher = FileWatcher(
+            [
+                (live.root / "config", "*.yaml"),
+                (settings.path("pipelines"), "*.yaml"),
+                (settings.path("agents"), "*/agent.md"),
+                (settings.path("agents"), "*/*.json"),  # gate schemas
+            ],
+            self.on_files_changed,
+        )
+
+    def on_files_changed(self, changed: list[Path]) -> None:
+        """Hot reload: apply edits and tell connected browsers (via the event bus)."""
+        settings = self.live.settings
+        config_dir = (self.live.root / "config").resolve()
+        pipelines_dir = settings.path("pipelines").resolve()
+        agents_dir = settings.path("agents").resolve()
+        parents = {p.resolve().parent for p in changed}
+        files = [p.resolve() for p in changed]
+        if config_dir in parents:
+            self.live.reload()  # emits config.reloaded / config.error via _on_config
+        if pipelines_dir in parents or any(f.is_relative_to(agents_dir) for f in files):
+            # Schemas live under agents/, and pipeline validity depends on agents.
+            pipelines, errors = self.orch.pipelines()
+            self.orch.bus.emit(
+                "pipelines.reloaded",
+                data={"pipelines": sorted(pipelines), "errors": errors},
+            )
+        if any(f.is_relative_to(agents_dir) for f in files):
+            self.orch.agents.reload()
+            self.orch.bus.emit(
+                "agents.reloaded",
+                data={
+                    "agents": sorted(self.orch.agents.agents),
+                    "errors": {e.name: e.message for e in self.orch.agents.errors},
+                    "changed": [
+                        str(f.relative_to(agents_dir))
+                        for f in files
+                        if f.is_relative_to(agents_dir)
+                    ],
+                },
+            )
 
     def _on_config(self, _settings: Any, error: ConfigError | None) -> None:
         message = str(error) if error else None
-        if message != self._config_error:
+        if error is None:
+            self._config_error = None
+            self.orch.bus.emit("config.reloaded", data={"error": None})
+        elif message != self._config_error:  # report each distinct error once
             self._config_error = message
-            self.orch.bus.emit(
-                "config.error" if error else "config.reloaded", data={"error": message}
-            )
+            self.orch.bus.emit("config.error", data={"error": message})
 
     # ------------------------------------------------------------------- status
 

@@ -6,7 +6,10 @@ review → docs → integrate) and produce working code in a target Git reposito
 Agents are isolated from each other by context, filesystem, execution sandbox and
 secrets. You can switch any agent to any model (cloud or local) mid-run, with no restart.
 
-> **Status: Milestone 5 of 7.** Config, providers (Fake and OpenAI-compatible),
+> **Status: Milestone 6 of 7.** Anthropic and Gemini adapters, hot reload of
+> `config/` and `agents/`, and `factory new agent|pipeline` are done (see
+> [docs/EXTENDING.md](docs/EXTENDING.md)). Remaining: the end-to-end todo-app test
+> (milestone 7). Earlier milestones: Config, providers (Fake and OpenAI-compatible),
 > declarative agents, and full isolation all work. So does the complete pipeline
 > interpreter: gates, parallel stages, loops, budgets and resume. `factory up` adds
 > a live web UI with gate controls and model switching. Remaining: Anthropic and
