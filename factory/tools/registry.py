@@ -19,11 +19,15 @@ import pkgutil
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from factory.agents.spec import AgentSpec, IsolationLevel
 from factory.core.artifacts import ArtifactStore
 from factory.core.events import EventBus
+from factory.isolation.permissions import Mode, PathPolicy, PermissionDenied
+from factory.isolation.sandboxes.base import SandboxBackend
+from factory.isolation.worktrees import RunRepo
 from factory.providers.base import ToolCall, ToolSpec
 
 ToolFunc = Callable[["ToolContext", dict[str, Any]], str]
@@ -54,17 +58,37 @@ class ToolContext:
     agent: AgentSpec
     artifacts: ArtifactStore
     bus: EventBus
+    workspace: Path | None = None  # the agent's git worktree (L1+)
+    policy: PathPolicy | None = None
+    sandbox: SandboxBackend | None = None
+    repo: RunRepo | None = None
+    #: Asked before an L3 agent's first networked command in a run; None = always deny.
+    approve_network: Callable[[str], bool] | None = None
 
-    def deny(self, tool: str, target: str, reason: str) -> ToolError:
-        """Log a permission denial and return the error to raise."""
+    def _decision(self, decision: str, tool: str, target: str, reason: str = "") -> None:
         self.bus.emit(
             "permission.decision",
             run_id=self.run_id,
             stage=self.stage_id,
             agent=self.agent.name,
-            data={"decision": "denied", "tool": tool, "target": target, "reason": reason},
+            data={"decision": decision, "tool": tool, "target": target, "reason": reason},
         )
+
+    def deny(self, tool: str, target: str, reason: str) -> ToolError:
+        """Log a permission denial and return the error to raise."""
+        self._decision("denied", tool, target, reason)
         return ToolError(f"permission denied: {reason}")
+
+    def check_path(self, tool: str, raw: str, mode: Mode) -> Path:
+        """Resolve `raw` through the permission layer, logging the decision."""
+        if self.policy is None:
+            raise self.deny(tool, raw, "this agent has no filesystem access")
+        try:
+            path = self.policy.check(raw, mode)
+        except PermissionDenied as exc:
+            raise self.deny(tool, raw, str(exc)) from None
+        self._decision("allowed", tool, self.policy.display(path), mode)
+        return path
 
 
 @dataclass(frozen=True)
@@ -176,7 +200,9 @@ class ToolRegistry:
                     if call.name in _TOOLS
                     else f"unknown tool {call.name!r}"
                 )
-                raise ctx.deny(call.name, call.name, reason)
+                args = call.arguments
+                target = args.get("path") or args.get("command") or args.get("name") or call.name
+                raise ctx.deny(call.name, str(target), reason)
             _check_args(t.schema, call.arguments)
             result = t.func(ctx, call.arguments)
             ok = True

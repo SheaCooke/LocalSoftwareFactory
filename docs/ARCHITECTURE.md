@@ -15,8 +15,11 @@ in [DECISIONS.md](DECISIONS.md).
 
 **Goals**
 
-- Runs on Windows 11 with Python 3.12+ and `uv`. No POSIX shell assumed; every path
-  goes through `pathlib`.
+- Runs on Windows 11 with Python 3.12+ and `uv`, either natively (PowerShell scripts,
+  Docker Desktop optional) or inside WSL2 (bash scripts, Docker Engine in the
+  distro). WSL2 is the recommended setup. Code assumes no particular shell, and
+  every path goes through `pathlib`. Windows-specific path defences stay active on
+  native Windows.
 - Any LLM: OpenAI-compatible servers (OpenAI, Azure, Ollama, LM Studio, vLLM,
   OpenRouter), Anthropic, Gemini, plus a Fake provider for offline tests.
 - Instant model switching with no restart: the model is resolved on every LLM call
@@ -215,7 +218,7 @@ See [ISOLATION.md](ISOLATION.md) for the full threat model. In summary:
 |---|---|
 | Context | Fresh conversation per invocation; only declared `inputs` artifacts injected |
 | Filesystem | `PermissionLayer` resolves every tool path: expand `{workspace}`/`{artifacts}`, reject absolute-outside-scope and `..` traversal, `Path.resolve()` to defeat symlink/junction escapes, then apply globs: a write needs a `write` match and no `deny` match; a read needs a `read` match and no `deny_read` match. (`deny` blocks writes only, so the implementer can read the tests it may not edit.) Every denial is logged and emitted as a `permission.decision` event with `decision: denied`. |
-| Worktrees | Each run has a Git repo with branch `factory/<run_id>/integration`. Each writing agent gets `git worktree add workspaces/<run_id>/<agent>` on its own branch. `builtin.merge` merges approved branches. |
+| Worktrees | Each run gets a private clone of the target (or a fresh `git init`) at `workspaces/<run_id>/_repo`, checked out on `factory/<run_id>/integration`. Each L1+ agent gets `workspaces/<run_id>/<agent>` on branch `factory/<run_id>/<agent>`. A writing agent's changes are committed when it finishes and merged into integration when its stage passes. Read-only agents get a fresh checkout every invocation. `builtin.merge` (M4) delivers integration back to the target repo behind a human gate. |
 | Execution | Levels L0–L3 checked by the tool registry (`required_isolation_level ≤ agent level`). `shell.run_sandboxed` goes to a pluggable `SandboxBackend`: **Docker** (only the worktree mounted, `--network none`, cpu/mem/pids limits, `--user 1000:1000`, timeout) or **restricted subprocess** fallback (cwd = worktree, timeout, secret-stripped env, allowlisted executables). The fallback raises a "reduced isolation" banner. L3 network needs a human gate on first use per run. |
 | Secrets | Keys only in provider adapters. Sandbox and subprocess environments are built from an explicit allowlist, not inherited. |
 | Roles | Enforced through `fs_scope` in shipped agent.md files *and* hard rules in the permission layer: an agent with `role: reviewer`/`security` can never get write tools; implementer deny `tests/**`; tester deny `src/**`. |

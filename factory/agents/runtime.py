@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Literal
 
 from factory.agents.context import InvocationContext, initial_messages, outputs_from_final
-from factory.agents.spec import READ_ONLY_ROLES, WRITE_TOOLS, AgentSpec
+from factory.agents.spec import READ_ONLY_ROLES, WRITE_TOOLS, AgentSpec, IsolationLevel
 from factory.config.loader import ConfigError
 from factory.core.events import EventBus
+from factory.isolation.permissions import PathPolicy
 from factory.providers.base import Message, ProviderError, Usage
 from factory.providers.resolver import ModelResolver
 from factory.secrets import redactor
@@ -56,7 +57,7 @@ class AgentRuntime:
             allowed = self.tools.for_agent(spec)
             if spec.role in READ_ONLY_ROLES and WRITE_TOOLS.intersection(allowed):
                 raise ToolConfigError(f"read-only role {spec.role!r} cannot hold write tools")
-            tool_ctx = ToolContext(ctx.run_id, ctx.stage_id, spec, ctx.artifacts, self.bus)
+            tool_ctx = self._tool_context(spec, ctx)
             tool_specs = [t.spec for t in allowed.values()]
             messages = initial_messages(spec, ctx, list(allowed))
             final: str | None = None
@@ -139,6 +140,21 @@ class AgentRuntime:
         return result
 
     # ------------------------------------------------------------------------- helpers
+
+    def _tool_context(self, spec: AgentSpec, ctx: InvocationContext) -> ToolContext:
+        iso = ctx.isolation
+        tool_ctx = ToolContext(ctx.run_id, ctx.stage_id, spec, ctx.artifacts, self.bus)
+        if iso is not None and spec.level >= IsolationLevel.L1:
+            tool_ctx.workspace = iso.workspace
+            tool_ctx.repo = iso.repo
+            tool_ctx.policy = PathPolicy(
+                spec.fs_scope, workspace=iso.workspace, artifacts=ctx.artifacts.directory
+            )
+            if spec.level >= IsolationLevel.L2:
+                tool_ctx.sandbox = iso.sandbox
+            if spec.level >= IsolationLevel.L3:
+                tool_ctx.approve_network = iso.approve_network
+        return tool_ctx
 
     def _emitter(
         self, spec: AgentSpec, ctx: InvocationContext

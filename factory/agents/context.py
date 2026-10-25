@@ -7,16 +7,29 @@ the artifacts listed in its `inputs`. No other agent's conversation is shared.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from factory.agents.spec import AgentSpec
 from factory.core.artifacts import ArtifactStore
+from factory.isolation.sandboxes.base import SandboxBackend
+from factory.isolation.worktrees import RunRepo
 from factory.providers.base import Message
 
 _TAGGED = re.compile(r'<artifact\s+name="([^"]+)"\s*>\n?(.*?)\n?</artifact>', re.DOTALL)
 _WHOLE_FENCE = re.compile(r"\A```[\w-]*\n(.*)\n```\s*\Z", re.DOTALL)
 _MAX_INPUT_CHARS = 200_000
+
+
+@dataclass(frozen=True)
+class AgentIsolation:
+    """Filesystem and execution resources granted to one invocation (L1+)."""
+
+    workspace: Path
+    repo: RunRepo
+    sandbox: SandboxBackend | None = None  # L2+
+    approve_network: Callable[[str], bool] | None = None  # L3
 
 
 @dataclass(frozen=True)
@@ -29,6 +42,7 @@ class InvocationContext:
     model_default: str | None = None  # pipeline stage `model:`: replaces the agent.md default
     feedback: str | None = None  # human gate comment or loop-back reason
     attempt: int = 1
+    isolation: AgentIsolation | None = None
 
 
 def writes_outputs_with_tool(spec: AgentSpec, tool_names: Iterable[str]) -> bool:
@@ -51,6 +65,20 @@ def system_prompt(spec: AgentSpec, tool_names: list[str]) -> str:
         )
     else:
         lines.append("- You have no tools. Answer in text only.")
+    if any(t.startswith(("fs.", "git.", "shell.")) for t in tool_names):
+
+        def show(globs: list[str]) -> str:
+            pretty = [g.replace("{workspace}/", "").replace("{workspace}", ".") for g in globs]
+            return ", ".join(f"`{g}`" for g in pretty) or "nothing"
+
+        scope = spec.fs_scope
+        lines.append(
+            "- File paths are relative to your workspace root (a private git worktree of the "
+            f"project). You may read {show(scope.read)} and write {show(scope.write)}."
+        )
+        if scope.deny:
+            lines.append(f"- You may never modify {show(scope.deny)}.")
+        lines.append("- Attempts outside this scope are blocked and logged.")
     if writes_outputs_with_tool(spec, tool_names):
         lines.append(
             "- Write every required output with `artifact.write`, then finish with a short "

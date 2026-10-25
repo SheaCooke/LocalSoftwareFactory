@@ -1,9 +1,15 @@
 """Orchestrator: interprets a pipeline for one run, stage by stage, persisting state.
 
-Milestone 2 scope: sequential `agent` stages with no gates. Pipelines that use
-parallel stages, builtin stages, gates or on_fail are rejected up front with a clear
-message until milestone 4 adds them. A run can be resumed at any time: completed
-stages are skipped, and a stage interrupted mid-flight is re-run.
+Current scope: sequential `agent` stages with no gates. Pipelines that use parallel
+stages, builtin stages, gates or on_fail are rejected up front with a clear message
+until milestone 4 adds them. A run can be resumed at any time: completed stages are
+skipped, and a stage interrupted mid-flight is re-run.
+
+Isolation per stage: L0 agents get no workspace. L1+ agents get their own git
+worktree of the run repo (read-only agents a fresh checkout each time), a
+PathPolicy built from their fs_scope, and, at L2+, the sandbox backend. After a
+writing agent finishes, its worktree is committed to its branch, and if the stage
+passed, merged into the run's integration branch for the next agent to see.
 """
 
 from __future__ import annotations
@@ -12,9 +18,10 @@ import time
 import uuid
 from pathlib import Path
 
-from factory.agents.context import InvocationContext
+from factory.agents.context import AgentIsolation, InvocationContext
 from factory.agents.loader import AgentRegistry
 from factory.agents.runtime import AgentRuntime
+from factory.agents.spec import READ_ONLY_ROLES, AgentSpec, IsolationLevel
 from factory.config.loader import ConfigError, LiveConfig
 from factory.core.artifacts import ArtifactStore
 from factory.core.events import Event, EventBus, JsonlEventLog
@@ -26,6 +33,8 @@ from factory.core.pipeline import (
     parse_pipeline,
 )
 from factory.core.store import TERMINAL_RUN, RunRecord, RunStore, StageStatus
+from factory.isolation.sandboxes import SandboxError, SandboxSelection, select_backend
+from factory.isolation.worktrees import GitError, RunRepo, git_available, run_git
 from factory.providers.resolver import ModelResolver
 from factory.tools.registry import ToolRegistry
 
@@ -69,6 +78,9 @@ class Orchestrator:
         self.tools = ToolRegistry()
         self.resolver = resolver or ModelResolver(live)
         self.runtime = AgentRuntime(self.resolver, self.tools, self.bus, self.runs_dir)
+        self._repos: dict[str, RunRepo] = {}
+        self._sandbox: SandboxSelection | None = None
+        self._isolation_reported: set[str] = set()
 
     # ------------------------------------------------------------------------- queries
 
@@ -96,6 +108,13 @@ class Orchestrator:
             problems.append(
                 f"agent {name!r} is invalid: {err.message}" if err else f"agent {name!r} not found"
             )
+        needs_git = any(
+            a.level >= IsolationLevel.L1
+            for n, a in self.agents.agents.items()
+            if n in spec.referenced_agents()
+        )
+        if needs_git and not git_available():
+            problems.append("git is required for agent worktrees but is not on PATH")
         if problems:
             raise PipelineError(
                 f"pipeline {spec.name!r} cannot run:\n  - " + "\n  - ".join(problems)
@@ -125,6 +144,14 @@ class Orchestrator:
                 f"{', '.join(sorted(pipelines)) or '(none)'}"
             )
         self.check_runnable(spec)
+        if repo is not None:
+            repo = str(Path(repo).resolve())
+            try:
+                run_git(["rev-parse", "--verify", "HEAD"], Path(repo))
+            except (GitError, OSError) as exc:
+                raise PipelineError(
+                    f"--repo {repo} must be a git repository with at least one commit"
+                ) from exc
 
         run_id = new_run_id()
         run_dir = self.run_dir(run_id)
@@ -193,22 +220,104 @@ class Orchestrator:
             self._set_stage(run.id, stage.id, "failed", missing)
             return missing
         attempt = (rec.attempts if (rec := self.store.stage(run.id, stage.id)) else 1) or 1
-        ctx = InvocationContext(
-            run_id=run.id,
-            stage_id=stage.id,
-            request=run.request,
-            artifacts=self.artifacts(run.id),
-            model_override=run.model_override,
-            model_default=stage.model,
-            attempt=attempt,
-        )
+        writable = agent.level >= IsolationLevel.L2 and agent.role not in READ_ONLY_ROLES
+        error: str | None = None
         try:
+            isolation = self._isolation(run, agent, writable)
+            ctx = InvocationContext(
+                run_id=run.id,
+                stage_id=stage.id,
+                request=run.request,
+                artifacts=self.artifacts(run.id),
+                model_override=run.model_override,
+                model_default=stage.model,
+                attempt=attempt,
+                isolation=isolation,
+            )
             result = self.runtime.invoke(agent, ctx)
-            error = None if result.status == "passed" else result.error or "agent failed"
+            if result.status != "passed":
+                error = result.error or "agent failed"
+            if isolation is not None and writable:
+                error = (
+                    self._land_changes(run, stage, agent, attempt, passed=error is None) or error
+                )
+        except (GitError, SandboxError) as exc:
+            error = str(exc)
         except Exception as exc:
             error = f"internal error: {type(exc).__name__}: {exc}"
         self._set_stage(run.id, stage.id, "failed" if error else "passed", error)
         return error
+
+    # ------------------------------------------------------------------- isolation
+
+    def repo(self, run: RunRecord) -> RunRepo:
+        """The run's private git repo (created on first use)."""
+        repo = self._repos.get(run.id)
+        if repo is None:
+            repo = RunRepo(self.live.settings.path("workspaces"), run.id)
+            self._repos[run.id] = repo
+        repo.ensure(Path(run.repo) if run.repo else None)
+        return repo
+
+    def sandbox(self) -> SandboxSelection:
+        """The sandbox backend for this process (selected once, on first use)."""
+        if self._sandbox is None:
+            self._sandbox = select_backend(self.live.settings.factory.sandbox)
+        return self._sandbox
+
+    def _isolation(self, run: RunRecord, agent: AgentSpec, writable: bool) -> AgentIsolation | None:
+        if agent.level < IsolationLevel.L1:
+            return None  # L0: text in, artifact out
+        repo = self.repo(run)
+        workspace = repo.prepare(agent.name, writable=writable)
+        sandbox = None
+        if agent.level >= IsolationLevel.L2:
+            selection = self.sandbox()
+            if run.id not in self._isolation_reported:
+                self._isolation_reported.add(run.id)
+                self.bus.emit(
+                    "isolation.status",
+                    run_id=run.id,
+                    data={
+                        "backend": selection.backend.name,
+                        "reduced": selection.reduced_isolation,
+                        "reason": selection.reason,
+                        "message": selection.describe(),
+                    },
+                )
+            sandbox = selection.backend
+        # L3 network approval is a human gate (milestone 4); until then it is always denied.
+        return AgentIsolation(workspace=workspace, repo=repo, sandbox=sandbox, approve_network=None)
+
+    def _land_changes(
+        self, run: RunRecord, stage: StageSpec, agent: AgentSpec, attempt: int, *, passed: bool
+    ) -> str | None:
+        """Commit the agent's worktree; merge into integration if the stage passed."""
+        repo = self.repo(run)
+        status = "passed" if passed else "failed"
+        sha = repo.commit(
+            agent.name, f"factory: {stage.id} by {agent.name} ({status}, attempt {attempt})"
+        )
+        merged = False
+        if passed:
+            try:
+                merged = repo.merge_to_integration(
+                    agent.name, f"factory: merge {stage.id} ({agent.name})"
+                )
+            except GitError as exc:
+                return str(exc)
+        self.bus.emit(
+            "workspace.landed",
+            run_id=run.id,
+            stage=stage.id,
+            agent=agent.name,
+            data={
+                "commit": sha,
+                "merged_to_integration": merged,
+                "branch": repo.branch(agent.name),
+            },
+        )
+        return None
 
     def _get(self, run_id: str) -> RunRecord:
         run = self.store.get_run(run_id)

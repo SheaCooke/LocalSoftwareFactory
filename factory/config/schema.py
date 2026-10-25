@@ -100,8 +100,8 @@ class LimitsConfig(_Strict):
 
 
 class SandboxConfig(_Strict):
-    backend: Literal["auto", "docker", "subprocess"] = "auto"
-    image: str = "python:3.12-slim"
+    backend: str = "auto"  # "auto" or a registered backend name (docker, subprocess, ...)
+    image: str = "software-factory-sandbox:py312"
     cpus: float = Field(default=2.0, gt=0)
     memory: str = "2g"
     pids_limit: int = Field(default=256, gt=0)

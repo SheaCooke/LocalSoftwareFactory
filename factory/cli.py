@@ -13,6 +13,9 @@ from factory.config.loader import ConfigError, LiveConfig, find_root
 from factory.core.events import Event
 from factory.core.orchestrator import Orchestrator
 from factory.core.pipeline import PipelineError
+from factory.isolation.sandboxes import SandboxError, select_backend
+from factory.isolation.sandboxes.docker_backend import DockerSandbox, build_image, container_user
+from factory.isolation.worktrees import RunRepo
 from factory.providers.base import Message, ProviderError, Response
 from factory.providers.resolver import ModelResolver
 from factory.secrets import redactor
@@ -24,6 +27,8 @@ run_app = typer.Typer(no_args_is_help=True, help="Start a run.")
 runs_app = typer.Typer(no_args_is_help=True, help="Inspect and resume runs.")
 agents_app = typer.Typer(no_args_is_help=True, help="Inspect agent definitions.")
 pipelines_app = typer.Typer(no_args_is_help=True, help="Inspect pipelines.")
+sandbox_app = typer.Typer(no_args_is_help=True, help="Inspect or build the command sandbox.")
+app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(models_app, name="models")
 app.add_typer(model_app, name="model")
 app.add_typer(run_app, name="run")
@@ -179,6 +184,12 @@ def _print_event(event: Event) -> None:
         )
     elif event.type == "artifact.written":
         typer.echo(f"   {who} wrote artifact {d['name']}")
+    elif event.type == "isolation.status" and d.get("reduced"):
+        typer.secho(f"!! {d['message']}", fg=typer.colors.YELLOW, bold=True)
+    elif event.type == "workspace.landed":
+        merged = " -> merged into integration" if d.get("merged_to_integration") else ""
+        commit = str(d["commit"])[:10] if d.get("commit") else "no changes"
+        typer.echo(f"   {who} committed {commit} on {d['branch']}{merged}")
 
 
 def _execute(orch: Orchestrator, run_id: str, quiet: bool, *, resume: bool = False) -> None:
@@ -278,6 +289,10 @@ def runs_show(
     typer.echo("\nartifacts:")
     for name in orch.artifacts(run_id).list():
         typer.echo(f"   {name}")
+    run_repo = RunRepo(orch.live.settings.path("workspaces"), run_id)
+    if run_repo.exists:
+        files = run_repo.files_on_integration()
+        typer.echo(f"\nworkspace: {run_repo.repo}  ({run_repo.integration}, {len(files)} files)")
     transcripts = sorted((orch.run_dir(run_id) / "transcripts").glob("*.json"))
     typer.echo(f"\ntranscripts: {len(transcripts)} in {orch.run_dir(run_id) / 'transcripts'}")
     if events:
@@ -328,6 +343,47 @@ def pipelines_list(root: RootOption = None) -> None:
         typer.echo(f"  {name:<10} {stages}{note}")
     for file, message in sorted(errors.items()):
         typer.secho(f"! {file}: {message}", fg=typer.colors.RED)
+
+
+@sandbox_app.command("status")
+def sandbox_status(root: RootOption = None) -> None:
+    """Show which sandbox backend shell.run_sandboxed would use."""
+    config = _live(root).settings.factory.sandbox
+    try:
+        selection = select_backend(config)
+    except SandboxError as exc:
+        raise _fail(str(exc)) from exc
+    color = typer.colors.YELLOW if selection.reduced_isolation else typer.colors.GREEN
+    typer.secho(selection.describe(), fg=color)
+    if selection.reduced_isolation:
+        typer.echo(f"allowlisted commands: {', '.join(config.command_allowlist)}")
+        typer.echo(
+            "For full isolation start Docker (WSL/Linux: `sudo service docker start`; "
+            "Windows: Docker Desktop), then run `factory sandbox build`."
+        )
+    elif isinstance(selection.backend, DockerSandbox):
+        typer.echo(f"image {config.image}, user {container_user()}, network none")
+        memory = f"memory {config.memory}, cpus {config.cpus}, pids {config.pids_limit}"
+        if DockerSandbox.swap_limit_supported():
+            typer.echo(memory)
+        else:
+            typer.echo(f"{memory} (no swap accounting: per-process `ulimit -v` cap applied)")
+
+
+@sandbox_app.command("build")
+def sandbox_build(root: RootOption = None) -> None:
+    """Build the Docker sandbox image (python + pytest/ruff/mypy, non-root user)."""
+    config = _live(root).settings.factory.sandbox
+    typer.echo(f"building {config.image} ...")
+    try:
+        proc = build_image(config)
+    except FileNotFoundError as exc:
+        raise _fail(
+            "docker CLI not found; install Docker Engine (WSL/Linux) or Docker Desktop"
+        ) from exc
+    if proc.returncode != 0:
+        raise _fail(f"docker build failed:\n{proc.stderr[-4000:]}")
+    typer.secho(f"built {config.image}", fg=typer.colors.GREEN)
 
 
 if __name__ == "__main__":

@@ -850,6 +850,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "truststore" },
@@ -864,7 +865,6 @@ keyring = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
-    { name = "pytest" },
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
@@ -874,6 +874,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "keyring", marker = "extra == 'keyring'", specifier = ">=25" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pytest", specifier = ">=8" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "truststore", specifier = ">=0.10" },
@@ -884,7 +885,6 @@ provides-extras = ["keyring"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.11" },
-    { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.6" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]

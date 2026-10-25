@@ -1,0 +1,15 @@
+name: build
+description: Requirements to documented code with no gates or review (sequential; isolation fully enforced)
+stages:
+  - id: requirements
+    agent: requirements
+  - id: design
+    agent: architect
+  - id: plan
+    agent: planner
+  - id: tests
+    agent: tester
+  - id: implement
+    agent: implementer
+  - id: docs
+    agent: docs

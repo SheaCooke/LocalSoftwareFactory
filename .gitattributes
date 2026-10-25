@@ -6,6 +6,10 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
+# Shell scripts and the sandbox Dockerfile must stay LF or bash/sh inside WSL breaks.
+*.sh text eol=lf
+Dockerfile text eol=lf
+
 # Binary
 *.png binary
 *.jpg binary

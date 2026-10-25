@@ -74,8 +74,12 @@ Write-Step 'Checking Docker (optional)'
 $docker = Get-Command docker -ErrorAction SilentlyContinue
 if ($docker) {
     & docker info --format '{{.ServerVersion}}' *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Host '    Docker is running: sandboxed execution available.' }
-    else { Write-Warn 'Docker is installed but not running. The factory will use reduced isolation.' }
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host '    Docker is running; building the sandbox image (first time takes a few minutes).'
+        & uv run factory sandbox build
+        if ($LASTEXITCODE -ne 0) { Write-Warn 'Sandbox image build failed; the factory will use reduced isolation until `factory sandbox build` succeeds.' }
+    }
+    else { Write-Warn 'Docker is installed but not running. The factory will use reduced isolation (start Docker Desktop, then run: uv run factory sandbox build).' }
 } else {
     Write-Warn 'Docker not found. The factory will use the restricted-subprocess sandbox (reduced isolation).'
 }
